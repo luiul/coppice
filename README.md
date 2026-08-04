@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A path-based CLI for managing git worktrees across every repo on your
-machine, from a single set of commands, no `cd` required.
+machine, from a single set of commands.
 
 Built on top of [`wt`](https://worktrunk.dev) (worktrunk), which does the
 actual worktree work (creating them, running hooks, etc.). `coppice` adds
@@ -13,13 +13,16 @@ what `wt` doesn't: commands that reach across *all* your repos from
 
 ## Why
 
-Normally, working on more than one thing in a repo means switching
-branches one at a time: stash, checkout, work, stash again. That's
-sequential, even when the tasks themselves aren't. Worktrees turn that
-into parallel work: several branches checked out side by side, each in
-its own directory, sharing the same `.git` history, no stashing, no
-switching needed. `coppice` makes spinning those up, and cleaning them
-back down, a one-liner, from anywhere, whether it's one repo or twenty.
+Working on more than one thing in a repo usually means switching
+branches one at a time: stash, checkout, work, then stash again to switch
+back. That switching is sequential, even when the tasks themselves
+aren't.
+
+Git worktrees fix this: each branch gets its own directory, all sharing
+the same `.git` history, so several branches can be checked out at once
+instead of switched between. `coppice` makes creating and cleaning up
+those worktrees a one-liner, from anywhere on disk, whether that's one
+repo or twenty.
 
 ### Parallelize work in a single repo
 
