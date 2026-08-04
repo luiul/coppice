@@ -7,9 +7,10 @@ itself stays the source of truth for worktree paths, hooks, and herdr
 registration, `coppice` only shells out to it and to `git`.
 
 Note: `coppice` is a plain executable, not a shell function, so it cannot
-change your shell's working directory the way `wt`'s own shell integration
-does. `coppice new` prints the resulting path; `cd` into it yourself, or see
-https://github.com/luiul/coppice/issues for planned shell integration.
+change your shell's working directory on its own the way `wt`'s own shell
+integration does. Run `eval "$(coppice shell init zsh)"` in your shell rc
+file (see `coppice shell init --help`) to get the same behavior: `coppice
+new` will then `cd` you into the resulting worktree.
 """
 
 from __future__ import annotations
@@ -21,7 +22,7 @@ import typer
 from rich.console import Console
 
 from coppice import branch as branch_mod
-from coppice import repo, wt
+from coppice import repo, shell, wt
 
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
@@ -35,6 +36,9 @@ current working directory.
   [cyan]coppice new .[/cyan]            ...for the repo you're standing in
   [cyan]coppice list[/cyan]             List worktrees across every known repo
   [cyan]coppice remove my-branch[/cyan] Remove a worktree by branch name
+
+Run [cyan]eval "$(coppice shell init zsh)"[/cyan] in your shell rc file so
+[cyan]coppice new[/cyan] can `cd` you into the resulting worktree.
 """
 
 app = typer.Typer(
@@ -115,7 +119,11 @@ def cmd_new(
     repo.register_repo(repo_root)
 
     verb = "Created" if result.get("action") == "created" else "Reused"
-    console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{result.get('path')}[/]")
+    result_path = result.get("path")
+    console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{result_path}[/]")
+
+    if result_path:
+        shell.write_cd_file(Path(result_path))
 
 
 def _creation_ts(path: Path) -> float | None:
@@ -279,3 +287,28 @@ def cmd_remove(
         raise _fail(f"failed to remove: {', '.join(failures)}")
 
     console.print(f"Removed {len(branches)} worktree(s).")
+
+
+shell_app = typer.Typer(help="Shell integration, so 'coppice new' can cd you into the resulting worktree.")
+app.add_typer(shell_app, name="shell")
+
+
+@shell_app.command("init")
+def cmd_shell_init(
+    shell_name: Annotated[str, typer.Argument(help="Shell to generate integration for.")] = "zsh",
+) -> None:
+    """Print a shell function that wraps 'coppice' and 'cd's into worktrees 'coppice new' creates.
+
+    coppice is a plain executable, so it can't change your shell's working
+    directory on its own (only a shell function running in the same process
+    can). This prints a function that shadows the 'coppice' command: it runs
+    the real binary, then 'cd's if 'coppice new' recorded a resulting path.
+
+    Add this to your shell rc file:
+
+        eval "$(coppice shell init zsh)"
+    """
+    template = shell.TEMPLATES.get(shell_name)
+    if template is None:
+        raise _fail(f"unsupported shell '{shell_name}'. Supported: {', '.join(sorted(shell.TEMPLATES))}")
+    print(template, end="")
