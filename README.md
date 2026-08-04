@@ -18,11 +18,8 @@ branches one at a time: stash, checkout, work, stash again. That's
 sequential, even when the tasks themselves aren't. Worktrees turn that
 into parallel work: several branches checked out side by side, each in
 its own directory, sharing the same `.git` history, no stashing, no
-switching. That matters more than ever now that work isn't just yours:
-you're often running one or more coding agents alongside your own edits,
-and each of them needs an isolated checkout to work in without stepping
-on the others. `coppice` makes spinning those up, and cleaning them back
-up, a one-liner, from anywhere, whether it's one repo or twenty.
+switching needed. `coppice` makes spinning those up, and cleaning them
+back down, a one-liner, from anywhere, whether it's one repo or twenty.
 
 ### Parallelize work in a single repo
 
@@ -76,11 +73,9 @@ flowchart TD
     class decisionC,failTask incident;
 ```
 
-Shapes carry meaning here: the cylinder is a data store (a warehouse
-table), the hexagon is a config change (a DAG's schedule), the diamond is
-a decision point (is the run healthy?). `cop new ~/dbt-models` (or a bare
-`cop ~/dbt-models`) spins up the next worktree; `cop clean` sweeps up
-whichever ones are done, merged, and idle.
+`cop new ~/dbt-models` (or a bare `cop ~/dbt-models`) spins up the next
+worktree for that repo; `cop clean` sweeps up whichever ones are done,
+merged, and idle, once the work above is finished.
 
 ### Reach every repo, from anywhere
 
@@ -114,85 +109,58 @@ flowchart TD
     class reg regNode;
 ```
 
-The registry (cylinder, same as the warehouse table above, it's a data
-store too) is what makes this possible: each command takes an explicit
+The registry is what makes this possible: each command takes an explicit
 **path**, or defaults to every repo it already knows about, instead of
-relying on your current directory. That's the whole idea: `cop new
-~/dbt-models` works the same whether you're standing in `~/dbt-models`, in
-`~/airflow-dags`, or in your home directory.
+relying on your current directory. `cop new ~/dbt-models` works the same
+whether you're standing in `~/dbt-models`, in `~/airflow-dags`, or in your
+home directory.
 
 ## Concepts
 
-A **repo** is a single git repository, identified by its root directory
-(where `.git` lives). `coppice` works across as many repos as you have on
-disk, not just the one you're standing in.
+- **Repo**: a git repository, identified by its root directory (where
+  `.git` lives). `coppice` works across as many repos as you have on disk,
+  not just the one you're standing in.
+- **Commit**: a snapshot of the repo's files at a point in time, plus a
+  pointer to its parent commit(s). Every worktree of a repo shares the same
+  history of commits; making a commit in one worktree makes it visible to
+  every other worktree of that repo immediately.
+- **Branch**: a named pointer to a commit, e.g. `add-customer-id-column`.
+  It's cheap: git can have many branches with none of them checked out
+  anywhere. Normally you work on one branch at a time in one directory,
+  and switching (`git switch`/`git checkout`) requires committing or
+  stashing first.
+- **Worktree**: a separate, physical directory on disk, checked out to one
+  branch, linked to the same underlying `.git` history as every other
+  worktree of that repo. Instead of one directory that changes what's
+  checked out over time, you get several directories, each checked out to
+  a specific branch, at the same time, no stashing, no switching. A
+  repo's original checkout, the one where `.git` itself lives, is its
+  **main worktree**; every additional one is a **linked worktree**.
+- **Current worktree**: whichever one you happen to be standing in when
+  you run a command, shown as `[current]` in `cop list`.
+- **Registry**: the shared list of repos `coppice`/`wt` have seen before
+  (`~/.cache/wt/known-repos`). It's what lets `cop list`/`cop remove`/`cop
+  clean` operate across every repo you've touched, not just the one
+  you're standing in.
+- **Scope**: the set of repos a command like `list`/`remove`/`clean`
+  operates over. An explicit path (or `--repo`) scopes to just that one
+  repo; omitting it defaults to every repo in the registry, plus the one
+  you're standing in.
 
-A **branch** is a logical pointer to a specific commit in a repo's
-history, e.g. `add-customer-id-column`. It's just a name, git can have
-dozens of branches without any extra disk space or checked-out files.
-Normally you work on one branch at a time, in one directory: switching
-with `git switch`/`git checkout` changes what that directory's files look
-like, so any uncommitted work has to be committed or stashed first before
-you can move to a different branch there.
+### Worktree status: dirty, merged, stale
 
-A **worktree** is a separate, physical directory on disk, linked to that
-same underlying git database, that lets you check out and work on a
-branch without switching. Instead of one directory that changes what's
-checked out over time, you get several directories that are each checked
-out to a specific branch, at the same time, no stashing, no switching. A
-repo's original checkout, the one where `.git` itself lives, is its
-**main worktree**; every additional one is a **linked worktree**. All of a
-repo's worktrees, main and linked, share the exact same `.git` history,
-commits, and remotes, so a commit made in one is visible to the others
-immediately.
+Three states `cop list`/`cop clean` report on and act on differently:
 
-```mermaid
-flowchart TD
-    history(["repo history — one .git, shared by every worktree below"])
-
-    subgraph mainWt["main worktree · ~/dbt-models"]
-        mnode["checked out: main"]
-    end
-
-    subgraph wtA["linked worktree · .worktrees/add-customer-id-column"]
-        anode["checked out: add-customer-id-column"]
-    end
-
-    subgraph wtB["linked worktree · .worktrees/fix-ingestion-retry"]
-        bnode["checked out: fix-ingestion-retry"]
-    end
-
-    orphan["branch: old-experiment<br/>(exists in git, no worktree anywhere)"]
-
-    history --> mainWt
-    history --> wtA
-    history --> wtB
-    history -.->|tracked, not checked out| orphan
-
-    linkStyle default stroke:#94a3b8,stroke-width:1.5px;
-
-    classDef historyNode fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95;
-    classDef mainNode fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
-    classDef linkedNode fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#312e81;
-    classDef ghostNode fill:#ffffff,stroke:#cbd5e1,stroke-width:1.5px,stroke-dasharray:4 3,color:#64748b;
-    class history historyNode;
-    class mnode mainNode;
-    class anode,bnode linkedNode;
-    class orphan ghostNode;
-```
-
-One repo, one shared history, three worktrees (solid), one plain branch
-with none (dashed): `old-experiment` is real, `git log` and `git checkout`
-both see it, it's just not checked out anywhere right now, so no command
-below will list it as a worktree.
-
-The **current worktree** is whichever one you happen to be standing in
-when you run a command, shown as `[current]` in `cop list`.
-
-The **registry** is the shared list of repos `coppice`/`wt` have seen
-before (`~/.cache/wt/known-repos`). It's what lets `cop list`/`cop
-remove`/`cop clean` operate across every repo you've touched, not just the
-one you're standing in.
+- **Dirty**: the worktree has uncommitted changes (staged, modified,
+  untracked, deleted, or renamed). `clean` always skips dirty worktrees;
+  `remove` refuses them unless you pass `--force`/`-f`.
+- **Merged**: the branch has been merged into the repo's default branch.
+  Controls whether `remove`/`clean` also delete the branch itself (kept by
+  default unless merged, or `-D`/`--force-delete` is passed), and it's
+  what `clean --merged` filters on instead of age.
+- **Stale (dangling)**: the worktree's directory is already gone from disk
+  (removed outside `coppice`/`wt`) but git still has a record of it.
+  `clean` always removes these, regardless of age or the `--merged` flag.
 
 ### Branches vs. worktrees, in coppice's commands
 
@@ -200,23 +168,16 @@ coppice identifies things by **branch name** where it can, since that's
 what you already think in, but what its commands actually create, list,
 or remove is that branch's **worktree**, not the branch itself:
 
-- `cop new PATH [--branch BRANCH]` takes a repo **path**, not a branch,
-  as its argument, prompting for a branch name (or generating one) if
-  `--branch` is omitted. It creates that branch if it doesn't exist yet,
-  *and* a worktree checked out onto it. A branch with no worktree still
-  exists, you'd just have to `git checkout` it into some existing
-  directory to see it, the whole point of `new` is skipping that.
-- `cop list` lists worktrees, one line per checked-out branch, **not**
-  every branch in the repo. A repo can have branches nobody's actively
-  working on, with no worktree at all; those don't show up.
-- `cop remove BRANCH` is the one command that does take a branch name
-  directly, and deletes that branch's worktree directory. The branch
-  itself is only deleted too if it's merged, or you pass `-D`/
-  `--force-delete`, otherwise it survives, just without a checked-out
-  directory anywhere.
-- `cop clean` is the bulk version of `remove`: it scans every worktree in
-  scope and removes the ones matching your filter (age or merged); the
-  same branch-vs-worktree distinction applies.
+| Command | Takes | Does |
+|---|---|---|
+| `cop new PATH [--branch B] [--base REF]` | a repo **path** | creates branch `B` if it doesn't exist yet (from `REF`, default: `wt`'s default branch), plus a worktree checked out onto it |
+| `cop list [PATH]` | nothing, or a repo path | lists worktrees, one per checked-out branch, **not** every branch in the repo |
+| `cop remove BRANCH...` | one or more branch **names** | deletes each branch's worktree directory; the branch itself survives unless it's merged or `-D`/`--force-delete` is passed |
+| `cop clean` | filters (age or `--merged`) | the bulk version of `remove`: same branch-vs-worktree distinction applies |
+
+A branch with no worktree still exists, `git log`/`git checkout` see it
+fine, it's just not checked out anywhere, so it won't show up in `cop
+list` and there's nothing for `cop remove`/`cop clean` to act on.
 
 ## What it looks like
 
@@ -288,13 +249,14 @@ cop remove add-customer-id-column        # remove a worktree by branch name (bra
 cop remove a b --repo dbt-models --yes
 cop remove                               # ...or omit the branch for an fzf multi-select picker
 cop clean --dry-run                      # preview worktrees (not branches) older than 14 days, size + merge status
-cop clean -v                             # remove them (skips dirty worktrees and ones with an open PR)
+cop clean --yes                          # remove them (skips dirty worktrees and ones with an open PR)
 cop clean --merged                       # sweep every worktree on a merged branch instead, regardless of age
 cop clean 7 --repo dbt-models --merged   # ...scoped to one repo, merged only
 cop status                               # is wt on PATH, what's in the shared registry
 ```
 
-Run `cop --help` or `cop <command> --help` for the full option list.
+Run `cop --help` or `cop <command> --help` for the full option list. A
+bare `cop PATH` is shorthand for `cop new PATH`.
 
 ### How the registry works
 
