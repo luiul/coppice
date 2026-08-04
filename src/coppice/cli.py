@@ -416,10 +416,9 @@ def cmd_list(
         if show_size:
             all_paths = [p for worktrees in worktrees_by_repo.values() for p in _sizeable_paths(worktrees)]
             if all_paths:
-                n_paths = len(all_paths)
 
-                def _report_progress(done: int, _total: int) -> None:
-                    spinner.update(f"[dim]Sizing worktrees ({done}/{n_paths})…[/dim]")
+                def _report_progress(done: int, total: int) -> None:
+                    spinner.update(f"[dim]Sizing worktrees ({done}/{total})…[/dim]")
 
                 size_cache = sizes.dir_sizes_kb(all_paths, on_progress=_report_progress)
             else:
@@ -808,12 +807,9 @@ def cmd_status(
             row = [_short_path(repo_root), str(len(worktrees))]
             if show_size:
                 sizeable = _sizeable_paths(worktrees)
-                n_paths = len(sizeable)
 
-                def _report_progress(
-                    done: int, _total: int, name: str = repo_root.name, total_paths: int = n_paths
-                ) -> None:
-                    spinner.update(f"[dim]Sizing {name} ({done}/{total_paths})…[/dim]")
+                def _report_progress(done: int, n_sizeable: int, name: str = repo_root.name) -> None:
+                    spinner.update(f"[dim]Sizing {name} ({done}/{n_sizeable})…[/dim]")
 
                 size_cache = sizes.dir_sizes_kb(sizeable, on_progress=_report_progress)
                 size_kb = sum(s for w in worktrees if (s := _worktree_size_kb(w, size_cache)) is not None)
