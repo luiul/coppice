@@ -128,7 +128,7 @@ def test_clean_dry_run_categorizes_candidates(tmp_path, monkeypatch):
     now = 2_000_000_000.0
     monkeypatch.setattr(cli.time, "time", lambda: now)
 
-    old_seconds = 30 * 86400  # older than the 2-week default threshold
+    old_seconds = 30 * 86400  # older than the 14-day default threshold
     young_seconds = 3 * 86400
     entries = [
         _entry("young-branch", tmp_path / "young", commit_ts=now - young_seconds),
@@ -145,7 +145,7 @@ def test_clean_dry_run_categorizes_candidates(tmp_path, monkeypatch):
     result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--dry-run", "--verbose"])
 
     assert result.exit_code == 0, result.output
-    assert "young-branch" in result.output and "younger than 2w" in result.output
+    assert "young-branch" in result.output and "younger than 14d" in result.output
     assert "dirty-branch" in result.output and "uncommitted changes" in result.output
     assert "pr-branch" in result.output and "open PR #42 Some PR" in result.output
     assert "mergeable-branch" in result.output and "merged" in result.output
@@ -170,6 +170,33 @@ def test_clean_nothing_to_clean(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "Nothing to clean." in result.output
+
+
+def test_clean_merged_ignores_age(tmp_path, monkeypatch):
+    """--merged sweeps up every merged worktree regardless of DAYS, but still
+    leaves young-but-unmerged branches alone.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    young_seconds = 1 * 86400
+
+    entries = [
+        _entry("young-merged", tmp_path / "young-merged", commit_ts=now - young_seconds, main_state="integrated"),
+        _entry("young-unmerged", tmp_path / "young-unmerged", commit_ts=now - young_seconds, main_state="ahead"),
+        _entry("main", tmp_path / "repo", is_main=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--merged", "--dry-run", "--verbose"])
+
+    assert result.exit_code == 0, result.output
+    assert "young-merged" in result.output and "merged, branch will be deleted" in result.output
+    assert "young-unmerged" in result.output and "not merged" in result.output
+    assert "1 removable" in result.output
 
 
 def test_remove_no_branch_no_candidates(tmp_path, monkeypatch):

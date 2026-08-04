@@ -451,13 +451,24 @@ def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
 
 @app.command("clean", rich_help_panel="Worktrees")
 def cmd_clean(
-    weeks: Annotated[int, typer.Argument(help="Remove worktrees older than this many weeks.")] = 2,
+    days: Annotated[int, typer.Argument(help="Remove worktrees older than this many days.")] = 14,
     repo_path: Annotated[
         str | None,
         typer.Option(
-            "--repo", "-C", help="Scope to this repo. Defaults to the registry plus the repo you're standing in."
+            "--repo",
+            "-C",
+            help="Scope to this repo's branches. Defaults to every known repo plus the repo you're standing in.",
         ),
     ] = None,
+    merged: Annotated[
+        bool,
+        typer.Option(
+            "--merged",
+            "-m",
+            help="Ignore DAYS and remove every merged worktree in scope instead, regardless of age "
+            "(still skips dirty worktrees and ones with an open PR).",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", "-n", help="List candidates without removing anything.")
     ] = False,
@@ -469,10 +480,15 @@ def cmd_clean(
         bool, typer.Option("--verbose", "-v", help="Also list worktrees under the age threshold, for context.")
     ] = False,
 ) -> None:
-    """Bulk-remove worktrees older than WEEKS (default: 2).
+    """Bulk-remove worktrees older than DAYS (default: 14), the natural next
+    step after 'coppice list'.
 
-    Scope is the shared registry plus the repo you're standing in, same as
-    'coppice list'/'coppice remove' default, or just --repo/-C PATH.
+    Pass --merged/-m to instead remove every merged worktree in scope
+    regardless of age, DAYS is ignored in that mode.
+
+    Scope is every known repo plus the repo you're standing in ("all
+    repos"), same as 'coppice list'/'coppice remove' default, or restrict to
+    one repo's branches with --repo/-C PATH ("all branches" in that repo).
 
     Skips: the main worktree, the current worktree, dirty worktrees, and
     branches with an open GitHub PR (via 'gh', when installed). Reports an
@@ -492,15 +508,18 @@ def cmd_clean(
     except wt.WtNotFoundError as exc:
         raise _fail(str(exc)) from exc
 
-    threshold_seconds = weeks * 7 * 86400
+    threshold_seconds = days * 86400
     have_gh = shutil.which("gh") is not None
 
-    console.print(f"Scanning {len(scope)} repo(s) for worktrees older than {weeks}w...")
+    if merged:
+        console.print(f"Scanning {len(scope)} repo(s) for merged worktrees (any age)...")
+    else:
+        console.print(f"Scanning {len(scope)} repo(s) for worktrees older than {days}d...")
 
     # (repo_root, branch, size_kb); size_kb is -1 for a stale/dangling entry
     # (its directory is already gone, there's nothing to size).
     candidates: list[tuple[Path, str, int]] = []
-    n_worktrees = n_young = n_dirty = n_pr = n_stale = 0
+    n_worktrees = n_young = n_dirty = n_pr = n_stale = n_unmerged = 0
 
     for repo_root in scope:
         others = [
@@ -525,32 +544,39 @@ def cmd_clean(
                 continue
 
             seconds = _age_seconds(w)
-            if seconds is None:
-                if verbose:
-                    lines.append(f"  keep  ?     {branch_name}  (age unknown)")
-                continue
-            age_days = int(seconds / 86400)
+            age_label = f"{int(seconds / 86400)}d" if seconds is not None else "?"
 
-            if seconds < threshold_seconds:
-                n_young += 1
-                if verbose:
-                    lines.append(f"  keep  {age_days}d  {branch_name}  (younger than {weeks}w)")
-                continue
+            if merged:
+                if w.get("main_state") not in ("empty", "integrated"):
+                    n_unmerged += 1
+                    if verbose:
+                        lines.append(f"  keep  {age_label}  {branch_name}  (not merged)")
+                    continue
+            else:
+                if seconds is None:
+                    if verbose:
+                        lines.append(f"  keep  ?     {branch_name}  (age unknown)")
+                    continue
+                if seconds < threshold_seconds:
+                    n_young += 1
+                    if verbose:
+                        lines.append(f"  keep  {age_label}  {branch_name}  (younger than {days}d)")
+                    continue
 
             if _is_dirty(w):
                 n_dirty += 1
-                lines.append(f"  [yellow]skip[/]  {age_days}d  {branch_name}  (uncommitted changes)")
+                lines.append(f"  [yellow]skip[/]  {age_label}  {branch_name}  (uncommitted changes)")
                 continue
 
             if have_gh and (pr_info := gh.open_pr(repo_root, branch_name)):
                 n_pr += 1
-                lines.append(f"  [yellow]skip[/]  {age_days}d  {branch_name}  (open PR {pr_info})")
+                lines.append(f"  [yellow]skip[/]  {age_label}  {branch_name}  (open PR {pr_info})")
                 continue
 
             size_kb = sizes.dir_size_kb(Path(w["path"])) if w.get("path") else 0
             merge_label = _merge_label(w, force_delete=force_delete)
             lines.append(
-                f"  [green]rm[/]    {age_days}d  {branch_name}  ({sizes.human_kb(size_kb)} on disk, {merge_label})"
+                f"  [green]rm[/]    {age_label}  {branch_name}  ({sizes.human_kb(size_kb)} on disk, {merge_label})"
             )
             candidates.append((repo_root, branch_name, size_kb))
 
@@ -562,10 +588,17 @@ def cmd_clean(
 
     console.print()
     stale_note = f", {n_stale} stale (dangling) reference(s)" if n_stale else ""
-    console.print(
-        f"Scanned {len(scope)} repo(s), {n_worktrees} worktree(s): {len(candidates)} removable, "
-        f"{n_dirty} dirty, {n_pr} with an open PR, {n_young} under {weeks}w old{stale_note}."
-    )
+    if merged:
+        unmerged_note = f", {n_unmerged} not merged" if n_unmerged else ""
+        console.print(
+            f"Scanned {len(scope)} repo(s), {n_worktrees} worktree(s): {len(candidates)} removable, "
+            f"{n_dirty} dirty, {n_pr} with an open PR{unmerged_note}{stale_note}."
+        )
+    else:
+        console.print(
+            f"Scanned {len(scope)} repo(s), {n_worktrees} worktree(s): {len(candidates)} removable, "
+            f"{n_dirty} dirty, {n_pr} with an open PR, {n_young} under {days}d old{stale_note}."
+        )
 
     if not candidates:
         console.print("Nothing to clean.")
