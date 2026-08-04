@@ -22,7 +22,9 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
+from rich import box
 from rich.console import Console
+from rich.table import Table
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
@@ -110,14 +112,18 @@ def _fail(message: str) -> typer.Exit:
 def _print_existing_worktrees(repo_root: Path) -> None:
     """Show what's already in flight before prompting for a new branch,
     to avoid accidentally starting a near-duplicate of existing work.
+
+    Skips the (slow, directory-walking) size column here: this preview runs
+    on every 'coppice new' before the user's even typed a branch name, so it
+    stays fast rather than complete.
     """
     worktrees = wt.list_worktrees(repo_root)
     others = [w for w in worktrees if not w.get("is_main") and not w.get("is_current")]
     if not others:
         return
     console.print(f"Existing worktrees for [bold]{repo_root.name}[/]:")
-    for w in others:
-        console.print(_format_worktree_line(w))
+    table, _total_kb = _worktrees_table(others, show_size=False)
+    console.print(table)
 
 
 @app.command("new", rich_help_panel="Worktrees")
@@ -222,39 +228,135 @@ def _is_dirty(entry: dict[str, Any]) -> bool:
     return any(wtree.get(k) for k in ("staged", "modified", "untracked", "deleted", "renamed"))
 
 
-def _format_worktree_line(entry: dict[str, Any]) -> str:
-    """One display line for ENTRY: branch, age, [main]/[current] tags, and
-    dirty/merged flags. Shared by `list`'s per-repo rendering and `new`'s
-    pre-prompt "here's what's already in flight" preview, so a worktree
-    looks the same wherever `coppice` shows one.
+def _short_path(path: Path, max_len: int = 48) -> str:
+    """Shorten PATH for a table cell: collapse the home directory to '~',
+    then middle-ellipsize anything still longer than MAX_LEN, keeping the
+    tail (a repo's own name matters more than its parent directories).
     """
-    tags = []
-    if entry.get("is_main"):
-        tags.append("[dim][main][/]")
-    if entry.get("is_current"):
-        tags.append("[green][current][/]")
-
-    flags = []
-    if _is_dirty(entry):
-        flags.append("dirty")
-    if entry.get("main_state") in ("empty", "integrated"):
-        flags.append("merged")
-
-    tag_str = f" {' '.join(tags)}" if tags else ""
-    flag_str = f" ({', '.join(flags)})" if flags else ""
-    return f"  {entry.get('branch')}  {_age_days(entry)}{tag_str}{flag_str}"
+    s = str(path)
+    home = str(Path.home())
+    if s == home:
+        s = "~"
+    elif s.startswith(home + "/"):
+        s = "~" + s[len(home) :]
+    if len(s) <= max_len:
+        return s
+    return "\u2026" + s[-(max_len - 1) :]
 
 
-def _render_repo_worktrees(repo_root: Path, worktrees: list[dict[str, Any]]) -> int:
-    if not worktrees:
-        return 0
+def _worktree_size_kb(entry: dict[str, Any], size_cache: dict[Path, int] | None = None) -> int | None:
+    """On-disk size of ENTRY's worktree in KB, or None if unknown: a
+    prunable/stale entry's directory is already gone, and an entry with no
+    'path' at all can't be sized.
 
-    console.print()
-    console.print(f"[bold]{repo_root.name}[/]:")
+    Looks ENTRY's path up in SIZE_CACHE when given (callers sizing more than
+    one worktree should precompute it with `_sizeable_paths` +
+    `sizes.dir_sizes_kb` so every worktree's directory is walked in
+    parallel, rather than one at a time here). Falls back to a direct,
+    single-path `dir_size_kb` call otherwise.
+    """
+    if entry.get("worktree", {}).get("state") == "prunable":
+        return None
+    path = entry.get("path")
+    if not path:
+        return None
+    if size_cache is not None:
+        return size_cache.get(Path(path), 0)
+    return sizes.dir_size_kb(Path(path))
+
+
+def _sizeable_paths(worktrees: list[dict[str, Any]]) -> list[Path]:
+    """Paths worth handing to `sizes.dir_sizes_kb`: every worktree in
+    WORKTREES that isn't prunable and has a path, i.e. exactly the entries
+    `_worktree_size_kb` would otherwise walk one at a time.
+    """
+    return [
+        Path(path) for w in worktrees if w.get("worktree", {}).get("state") != "prunable" and (path := w.get("path"))
+    ]
+
+
+def _merge_status(entry: dict[str, Any]) -> tuple[str, str]:
+    """(label, rich style) for ENTRY's merge status against main.
+
+    Doesn't apply to the main worktree itself (nothing to merge it into) or
+    a prunable/stale entry (its branch's relationship to main is moot once
+    the worktree directory is already gone).
+    """
+    if entry.get("is_main") or entry.get("worktree", {}).get("state") == "prunable":
+        return "-", "dim"
+    main_state = entry.get("main_state")
+    if main_state in ("empty", "integrated"):
+        return "merged", "green"
+    if main_state == "ahead":
+        return "unmerged", "yellow"
+    return "unknown", "dim"
+
+
+def _worktrees_table(
+    worktrees: list[dict[str, Any]], *, show_size: bool = True, size_cache: dict[Path, int] | None = None
+) -> tuple[Table, int]:
+    """Rich table for WORKTREES: branch, [main]/[current] tags, age,
+    optionally on-disk size, working-tree cleanliness, and merge status.
+
+    Shared by `list`'s per-repo rendering and `new`'s pre-prompt "here's
+    what's already in flight" preview, so a worktree looks the same wherever
+    `coppice` shows one. Returns the table plus the summed on-disk size in
+    KB (0 when SHOW_SIZE is False or every entry's size is unknown), so
+    callers can roll up a total without walking each worktree's directory
+    a second time.
+    """
+    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False)
+    table.add_column("Branch")
+    table.add_column("Tags")
+    table.add_column("Age", justify="right")
+    if show_size:
+        table.add_column("Size", justify="right")
+    table.add_column("Working tree")
+    table.add_column("Merge")
+
+    total_kb = 0
     for w in worktrees:
-        console.print(_format_worktree_line(w))
+        tags = []
+        if w.get("is_main"):
+            tags.append("[dim]main[/]")
+        if w.get("is_current"):
+            tags.append("[green]current[/]")
 
-    return len(worktrees)
+        branch = w.get("branch") or "?"
+        branch_cell = f"[bold green]{branch}[/]" if w.get("is_current") else branch
+
+        working_tree = "[yellow]dirty[/]" if _is_dirty(w) else "[dim]clean[/]"
+        merge_label, merge_style = _merge_status(w)
+
+        row = [branch_cell, " ".join(tags), _age_days(w)]
+        if show_size:
+            size_kb = _worktree_size_kb(w, size_cache)
+            total_kb += size_kb or 0
+            row.append(sizes.human_kb(size_kb) if size_kb is not None else "-")
+        row += [working_tree, f"[{merge_style}]{merge_label}[/]"]
+        table.add_row(*row)
+
+    return table, total_kb
+
+
+def _render_repo_worktrees(
+    repo_root: Path,
+    worktrees: list[dict[str, Any]],
+    *,
+    show_size: bool = True,
+    size_cache: dict[Path, int] | None = None,
+) -> tuple[int, int]:
+    """Print ENTRY's table under a repo-name heading. Returns (worktree
+    count, summed on-disk size in KB) for the caller's running total.
+    """
+    if not worktrees:
+        return 0, 0
+
+    table, total_kb = _worktrees_table(worktrees, show_size=show_size, size_cache=size_cache)
+    console.print()
+    console.print(f"[bold]{repo_root.name}[/]")
+    console.print(table)
+    return len(worktrees), total_kb
 
 
 @app.command("list", rich_help_panel="Worktrees")
@@ -266,6 +368,13 @@ def cmd_list(
     as_json: Annotated[
         bool, typer.Option("--json", help="Emit raw JSON, tagged per item with a 'repo' field.")
     ] = False,
+    show_size: Annotated[
+        bool,
+        typer.Option(
+            "--size/--no-size",
+            help="Show each worktree's on-disk size (walks its directory; disable for a faster listing).",
+        ),
+    ] = True,
 ) -> None:
     """List worktrees across every known repo, or just PATH."""
     try:
@@ -291,12 +400,47 @@ def cmd_list(
         console.print(json.dumps(merged))
         return
 
+    # `wt list` itself (one subprocess per repo) stays sequential, it's
+    # already fast; the slow part is on-disk sizing, which walks every
+    # worktree's directory. Fetch every repo's worktrees first, then size
+    # them all in one batch (with progress on the spinner) so that walk
+    # happens in parallel across every worktree in every repo instead of
+    # one at a time.
+    with console.status("[dim]Listing worktrees…[/dim]") as spinner:
+        worktrees_by_repo: dict[Path, list[dict[str, Any]]] = {}
+        for repo_root in repos:
+            spinner.update(f"[dim]Listing worktrees for {repo_root.name}…[/dim]")
+            worktrees_by_repo[repo_root] = wt.list_worktrees(repo_root)
+
+        size_cache: dict[Path, int] | None = None
+        if show_size:
+            all_paths = [p for worktrees in worktrees_by_repo.values() for p in _sizeable_paths(worktrees)]
+            if all_paths:
+                n_paths = len(all_paths)
+
+                def _report_progress(done: int, _total: int) -> None:
+                    spinner.update(f"[dim]Sizing worktrees ({done}/{n_paths})…[/dim]")
+
+                size_cache = sizes.dir_sizes_kb(all_paths, on_progress=_report_progress)
+            else:
+                size_cache = {}
+
+        spinner.stop()
+
     total = 0
+    total_kb = 0
     for repo_root in repos:
-        total += _render_repo_worktrees(repo_root, wt.list_worktrees(repo_root))
+        n, size_kb = _render_repo_worktrees(
+            repo_root, worktrees_by_repo[repo_root], show_size=show_size, size_cache=size_cache
+        )
+        total += n
+        total_kb += size_kb
 
     console.print()
-    console.print(f"Total: {total} worktree(s) across {len(repos)} repo(s).")
+    summary = f"Total: {total} worktree(s) across {len(repos)} repo(s)."
+    if show_size and total_kb:
+        summary += f" {sizes.human_kb(total_kb)} on disk."
+    console.print(summary)
 
 
 def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[dict[str, Any]]]) -> list[str] | None:
@@ -601,7 +745,15 @@ def cmd_clean(
 
 
 @app.command("status", rich_help_panel="Setup & diagnostics")
-def cmd_status() -> None:
+def cmd_status(
+    show_size: Annotated[
+        bool,
+        typer.Option(
+            "--size/--no-size",
+            help="Show each repo's total on-disk size (walks every worktree's directory; disable for a faster check).",
+        ),
+    ] = True,
+) -> None:
     """wt/registry health check.
 
     Deliberately minimal and generic: no project-specific tool checks (e.g.
@@ -622,15 +774,64 @@ def cmd_status() -> None:
         console.print(f"Known repos ({repo.REGISTRY_PATH}): none yet. Run 'coppice new' at least once.")
         return
 
+    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False)
+    table.add_column("Repo", no_wrap=True)
+    table.add_column("Worktrees", justify="right")
+    if show_size:
+        table.add_column("Size", justify="right")
+    table.add_column("Status")
+
+    total = 0
+    total_kb = 0
+    with console.status("[dim]Checking known repos…[/dim]") as spinner:
+        for repo_root in known:
+            spinner.update(f"[dim]Checking {_short_path(repo_root)}…[/dim]")
+
+            if not repo_root.exists():
+                row = [_short_path(repo_root), "-"]
+                if show_size:
+                    row.append("-")
+                row.append("[red]missing[/]")
+                table.add_row(*row)
+                continue
+
+            if wt_path is None:
+                row = [_short_path(repo_root), "?"]
+                if show_size:
+                    row.append("?")
+                row.append("[dim]unknown (wt missing)[/]")
+                table.add_row(*row)
+                continue
+
+            worktrees = wt.list_worktrees(repo_root)
+            total += len(worktrees)
+            row = [_short_path(repo_root), str(len(worktrees))]
+            if show_size:
+                sizeable = _sizeable_paths(worktrees)
+                n_paths = len(sizeable)
+
+                def _report_progress(
+                    done: int, _total: int, name: str = repo_root.name, total_paths: int = n_paths
+                ) -> None:
+                    spinner.update(f"[dim]Sizing {name} ({done}/{total_paths})…[/dim]")
+
+                size_cache = sizes.dir_sizes_kb(sizeable, on_progress=_report_progress)
+                size_kb = sum(s for w in worktrees if (s := _worktree_size_kb(w, size_cache)) is not None)
+                total_kb += size_kb
+                row.append(sizes.human_kb(size_kb))
+            row.append("[green]ok[/]")
+            table.add_row(*row)
+
+        spinner.stop()
+
     console.print(f"Known repos ({repo.REGISTRY_PATH}):")
-    for repo_root in known:
-        if not repo_root.exists():
-            console.print(f"  {repo_root}  [red](missing)[/]")
-        elif wt_path is None:
-            console.print(f"  {repo_root}")
-        else:
-            count = len(wt.list_worktrees(repo_root))
-            console.print(f"  {repo_root}  ({count} worktree(s))")
+    console.print(table)
+
+    if wt_path is not None:
+        summary = f"Total: {total} worktree(s) across {len(known)} repo(s)."
+        if show_size and total_kb:
+            summary += f" {sizes.human_kb(total_kb)} on disk."
+        console.print(summary)
 
 
 shell_app = typer.Typer(help="cd integration for 'coppice new' (see 'coppice shell init --help').")

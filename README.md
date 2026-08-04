@@ -56,15 +56,16 @@ without them.
 coppice new ./tardis          # create/reuse a worktree for the repo at ./tardis
 coppice new .                 # ...for the repo you're standing in
 coppice new . --branch fix-x  # skip the prompt, use a specific branch name
-coppice list                  # list worktrees across every known repo
-coppice list ./tardis         # ...just this one
-coppice list --json           # same, as JSON
+coppice list                  # table of worktrees (age, size, dirty/merge status) across every known repo
+coppice list ./tardis          # ...just this one
+coppice list --no-size        # skip the (directory-walking) size column, for a faster listing
+coppice list --json           # same data, as JSON
 coppice remove my-branch      # remove a worktree by branch name
 coppice remove a b --repo tardis --yes
 coppice remove                # ...or omit the branch for an fzf multi-select picker
 coppice clean --dry-run       # preview worktrees older than 2 weeks, with size + merge status
 coppice clean -v              # remove them (skips dirty worktrees and ones with an open PR)
-coppice status                # is wt on PATH, what's in the shared registry
+coppice status                # is wt on PATH, table of the shared registry (worktree count, size, health)
 ```
 
 Run `coppice --help` or `coppice <command> --help` for the full option list.

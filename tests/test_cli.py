@@ -232,7 +232,7 @@ def test_status_reports_wt_and_registry(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     flat_output = result.output.replace("\n", "")
     assert "wt v9.9.9" in flat_output
-    assert str(repo_dir) in flat_output
+    assert cli._short_path(repo_dir) in flat_output
     assert "1 worktree(s)" in flat_output
 
 
@@ -247,4 +247,4 @@ def test_status_without_wt_still_lists_registry(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     flat_output = result.output.replace("\n", "")
     assert "not found" in flat_output
-    assert str(repo_dir) in flat_output
+    assert cli._short_path(repo_dir) in flat_output
