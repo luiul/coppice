@@ -59,12 +59,14 @@ flowchart TD
     main --> wtB
     main --> wtC
 
-    classDef agent fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
-    classDef human fill:#fef3c7,stroke:#d97706,color:#78350f;
-    classDef mainNode fill:#e5e7eb,stroke:#6b7280,color:#111827;
-    classDef store fill:#ede9fe,stroke:#7c3aed,color:#4c1d95;
-    classDef config fill:#dcfce7,stroke:#16a34a,color:#14532d;
-    classDef incident fill:#fee2e2,stroke:#dc2626,color:#7f1d1d;
+    linkStyle default stroke:#94a3b8,stroke-width:1.5px;
+
+    classDef agent fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#312e81;
+    classDef human fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12;
+    classDef mainNode fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
+    classDef store fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95;
+    classDef config fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46;
+    classDef incident fill:#fef2f2,stroke:#f43f5e,stroke-width:2px,color:#881337;
     class agentA,agentB agent;
     class you human;
     class main mainNode;
@@ -101,9 +103,11 @@ flowchart TD
     reg --> airflow
     reg --> ingestion
 
-    classDef cliNode fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
-    classDef repoNode fill:#e5e7eb,stroke:#6b7280,color:#111827;
-    classDef regNode fill:#ede9fe,stroke:#7c3aed,color:#4c1d95;
+    linkStyle default stroke:#94a3b8,stroke-width:1.5px;
+
+    classDef cliNode fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#312e81;
+    classDef repoNode fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
+    classDef regNode fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95;
     class cli cliNode;
     class dbt,airflow,ingestion repoNode;
     class reg regNode;
@@ -135,7 +139,7 @@ airflow-dags:
 Total: 4 worktree(s) across 2 repo(s).
 
 $ cop clean --dry-run
-Scanning 2 repo(s) for worktrees older than 2w...
+Scanning 2 repo(s) for worktrees older than 14d...
 
 airflow-dags:
   rm    16d  backfill-2023-orders  (240M on disk, merged, branch will be deleted)
@@ -187,8 +191,10 @@ cop list --json                          # same, as JSON
 cop remove add-customer-id-column        # remove a worktree by branch name
 cop remove a b --repo dbt-models --yes
 cop remove                               # ...or omit the branch for an fzf multi-select picker
-cop clean --dry-run                      # preview worktrees older than 2 weeks, with size + merge status
+cop clean --dry-run                      # preview worktrees older than 14 days, with size + merge status
 cop clean -v                             # remove them (skips dirty worktrees and ones with an open PR)
+cop clean --merged                       # sweep every merged branch instead, regardless of age
+cop clean 7 --repo dbt-models --merged   # ...scoped to one repo, merged only
 cop status                               # is wt on PATH, what's in the shared registry
 ```
 
