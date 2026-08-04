@@ -457,7 +457,7 @@ def cmd_clean(
         typer.Option(
             "--repo",
             "-C",
-            help="Scope to this repo's branches. Defaults to every known repo plus the repo you're standing in.",
+            help="Scope to this repo's worktrees. Defaults to every known repo plus the repo you're standing in.",
         ),
     ] = None,
     merged: Annotated[
@@ -488,7 +488,7 @@ def cmd_clean(
 
     Scope is every known repo plus the repo you're standing in ("all
     repos"), same as 'coppice list'/'coppice remove' default, or restrict to
-    one repo's branches with --repo/-C PATH ("all branches" in that repo).
+    one repo's worktrees with --repo/-C PATH ("all worktrees" in that repo).
 
     Skips: the main worktree, the current worktree, dirty worktrees, and
     branches with an open GitHub PR (via 'gh', when installed). Reports an
