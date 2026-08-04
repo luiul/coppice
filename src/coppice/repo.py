@@ -1,10 +1,11 @@
-"""Repo resolution and the cross-repo registry `coppice` shares with `wtx`.
+"""Repo resolution and the cross-repo registry `coppice` reads and writes.
 
 `coppice` doesn't own worktree placement or lifecycle, `wt` (worktrunk) does
 (see dotfiles issue #6). This module just resolves a user-supplied PATH to a
 repo root, and reads/writes the same `~/.cache/wt/known-repos` registry file
-that the worktrunk `registry` post-start hook (and `wtx`) already populate,
-so `coppice list`/`coppice remove` see every repo either tool has touched.
+that the worktrunk `registry` post-start hook already populates, so
+`coppice list`/`coppice remove` see every repo that hook (or `coppice new`'s
+own self-heal below) has touched.
 """
 
 from __future__ import annotations
@@ -38,7 +39,7 @@ def resolve_repo_root(path: str | Path = ".") -> Path:
 
 
 def known_repos() -> list[Path]:
-    """Repos registered in the shared `wt`/`wtx`/`coppice` registry file."""
+    """Repos registered in the shared `wt`/`coppice` registry file."""
     if not REGISTRY_PATH.exists():
         return []
     return [Path(line) for line in REGISTRY_PATH.read_text().splitlines() if line.strip()]
@@ -61,9 +62,9 @@ def register_repo(repo: Path) -> None:
 def scope_repos(path: str | None) -> list[Path]:
     """Resolve the set of repos a scope-taking command should operate over.
 
-    An explicit PATH scopes to just that one repo. Omitting it mirrors
-    `wtx`'s default: every registered repo, plus the repo you're standing in
-    (if any), deduplicated.
+    An explicit PATH scopes to just that one repo. Omitting it defaults to
+    every registered repo, plus the repo you're standing in (if any),
+    deduplicated.
     """
     if path is not None:
         return [resolve_repo_root(path)]

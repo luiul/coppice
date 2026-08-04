@@ -1,12 +1,11 @@
 """Thin subprocess wrapper around the `wt` (worktrunk) binary.
 
 `coppice` does not reimplement worktree lifecycle, hooks, or path templating,
-`wt` stays the single source of truth (dotfiles issue #6: "we will center on
-wtx ... registering workspaces and worktrees to herdr rather than the other
-way around" applies just as much to `coppice` as it did to `wtx`). This
-module only shells out to `wt` and parses its `--format json` / `--json`
-output; every side effect (worktree paths, hooks, herdr registration) is
-`wt`'s own config, not something duplicated here.
+`wt` stays the single source of truth (dotfiles issue #6: worktree paths,
+hooks, and herdr registration are `wt`'s job, not something duplicated
+here). This module only shells out to `wt` and parses its `--format json` /
+`--json` output; every side effect (worktree paths, hooks, herdr
+registration) is `wt`'s own config.
 """
 
 from __future__ import annotations
@@ -53,8 +52,7 @@ def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subproc
 
 def _load_json(text: str) -> Any:
     # `wt list`'s JSON can carry a stray ANSI escape byte in the statusline
-    # field; strip it so json.loads never chokes on a raw control character
-    # (mirrors wtx's `tr -d '\033'`).
+    # field; strip it so json.loads never chokes on a raw control character.
     return json.loads(text.replace("\x1b", ""))
 
 

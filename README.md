@@ -5,10 +5,8 @@
 
 A path-based CLI for git worktrees, built on top of [`wt` (worktrunk)](https://worktrunk.dev).
 
-`coppice` is the planned Python replacement for [dotfiles' `wtx`](https://github.com/luiul/dotfiles/blob/main/zsh/.zsh_config/funcs_wt.zsh),
-a zsh entrypoint that wraps `wt` with branch naming, cross-repo listing, and
-cleanup. See [dotfiles#6](https://github.com/luiul/dotfiles/issues/6) for the
-plan this repo implements.
+See [dotfiles#6](https://github.com/luiul/dotfiles/issues/6) for the design
+rationale this repo implements.
 
 `coppice` does not reimplement worktree lifecycle, hooks, or herdr
 registration, `wt` stays the single source of truth for all of that. This
@@ -19,13 +17,18 @@ tool only shells out to `wt` (and `git`) and adds:
   ./tardis` from anywhere, not just `cd ./tardis && coppice new`.
 - **Branch-name normalization** for the interactive `new` prompt (lowercase,
   dash-joined, 40-character cap).
-- **Cross-repo listing/removal** via a registry file shared with `wtx`
-  (`~/.cache/wt/known-repos`), so both tools see the same set of repos
-  regardless of which one created a worktree.
+- **Cross-repo listing/removal** via a registry file (`~/.cache/wt/known-repos`)
+  populated by `wt`'s own `registry` post-start hook (or self-healed by
+  `coppice new` when that hook isn't configured).
 
 ## Install
 
-Requires [`wt`](https://worktrunk.dev) on `PATH`.
+**Prerequisite:** [`wt`](https://worktrunk.dev) (worktrunk) must already be installed and on `PATH`.
+`coppice` shells out to it for every worktree operation and does not work
+without it; commands fail with a clear error (`'wt' (worktrunk) is not
+installed. See https://worktrunk.dev`) rather than a partial or silent
+failure if it's missing. See [worktrunk.dev](https://worktrunk.dev) for `wt`
+install instructions.
 
 ```bash
 uv tool install coppice
@@ -41,6 +44,12 @@ worktree, see below) to your shell rc file:
 eval "$(coppice shell init zsh)"   # or: bash
 ```
 
+Optional, for extra features (both auto-detected, no config needed):
+[`fzf`](https://github.com/junegunn/fzf) for `coppice remove`'s interactive
+picker, and [`gh`](https://cli.github.com) for `coppice clean`'s open-PR
+safety check. Neither is required; each feature just degrades gracefully
+without them.
+
 ## Usage
 
 ```bash
@@ -52,6 +61,10 @@ coppice list ./tardis         # ...just this one
 coppice list --json           # same, as JSON
 coppice remove my-branch      # remove a worktree by branch name
 coppice remove a b --repo tardis --yes
+coppice remove                # ...or omit the branch for an fzf multi-select picker
+coppice clean --dry-run       # preview worktrees older than 2 weeks, with size + merge status
+coppice clean -v              # remove them (skips dirty worktrees and ones with an open PR)
+coppice status                # is wt on PATH, what's in the shared registry
 ```
 
 Run `coppice --help` or `coppice <command> --help` for the full option list.
@@ -77,10 +90,10 @@ cd "$(coppice new . --branch fix-x | tail -1 | sed 's/.* @ //')"
 
 ## Status
 
-Early days. `new`, `list`, `remove`, and shell integration cover the basics;
-see [open issues](https://github.com/luiul/coppice/issues) for what's not
-there yet (`clean`, an interactive removal picker, herdr registration
-independent of `wt`'s own hooks, and more).
+Early days. `new`, `list`, `remove` (with an interactive `fzf` picker),
+`clean`, `status`, and shell integration cover the daily loop; see [open
+issues](https://github.com/luiul/coppice/issues) for what's not there yet
+(herdr registration independent of `wt`'s own hooks, and more).
 
 ## Development
 

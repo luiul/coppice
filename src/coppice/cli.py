@@ -1,10 +1,9 @@
 """coppice: a path-based CLI for git worktrees, built on top of `wt` (worktrunk).
 
-`coppice` is the planned Python replacement for dotfiles' zsh `wtx` entrypoint
-(https://github.com/luiul/dotfiles/issues/6). Every subcommand takes an
-explicit PATH instead of relying on the current working directory, and `wt`
-itself stays the source of truth for worktree paths, hooks, and herdr
-registration, `coppice` only shells out to it and to `git`.
+Design rationale in https://github.com/luiul/dotfiles/issues/6. Every
+subcommand takes an explicit PATH instead of relying on the current working
+directory, and `wt` itself stays the source of truth for worktree paths,
+hooks, and herdr registration, `coppice` only shells out to it and to `git`.
 
 Note: `coppice` is a plain executable, not a shell function, so it cannot
 change your shell's working directory on its own the way `wt`'s own shell
@@ -15,6 +14,9 @@ new` will then `cd` you into the resulting worktree.
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import time
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -22,13 +24,14 @@ import typer
 from rich.console import Console
 
 from coppice import branch as branch_mod
-from coppice import repo, shell, wt
+from coppice import gh, repo, shell, sizes, wt
 
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
 
-Every subcommand takes an explicit repo PATH instead of relying on the
-current working directory.
+[bold]Requires [bold]wt[/] (worktrunk) installed and on PATH[/], see
+https://worktrunk.dev. Every subcommand takes an explicit repo PATH instead
+of relying on the current working directory.
 
 [bold]Quickstart[/bold]
 
@@ -36,6 +39,9 @@ current working directory.
   [cyan]coppice new .[/cyan]            ...for the repo you're standing in
   [cyan]coppice list[/cyan]             List worktrees across every known repo
   [cyan]coppice remove my-branch[/cyan] Remove a worktree by branch name
+  [cyan]coppice remove[/cyan]           ...or omit the branch for an fzf picker
+  [cyan]coppice clean[/cyan]            Bulk-remove worktrees older than 2 weeks
+  [cyan]coppice status[/cyan]           wt/registry health check
 
 Run [cyan]eval "$(coppice shell init zsh)"[/cyan] in your shell rc file so
 [cyan]coppice new[/cyan] can `cd` you into the resulting worktree.
@@ -94,6 +100,11 @@ def cmd_new(
     except repo.RepoResolutionError as exc:
         raise _fail(str(exc)) from exc
 
+    try:
+        wt.require_wt()
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+
     _print_existing_worktrees(repo_root)
 
     if branch is None:
@@ -139,20 +150,33 @@ def _creation_ts(path: Path) -> float | None:
     return float(ts) if ts else None
 
 
-def _age_days(entry: dict[str, Any]) -> str:
-    import time
-
+def _age_seconds(entry: dict[str, Any]) -> float | None:
+    """Seconds since ENTRY's worktree was created: filesystem birth time
+    where available, falling back to the branch's last-commit time (most
+    Linux filesystems, or the main worktree). None if neither is known, or
+    the worktree is `prunable` (its directory is already gone, so "age" is
+    meaningless, it's always a removal candidate regardless).
+    """
     if entry.get("worktree", {}).get("state") == "prunable":
-        return "stale"
-
-    now = time.time()
+        return None
     if not entry.get("is_main") and (creation_ts := _creation_ts(Path(entry["path"]))) is not None:
-        return f"{int((now - creation_ts) / 86400)}d"
-
+        return time.time() - creation_ts
     ts = entry.get("commit", {}).get("timestamp") or 0
     if not ts:
-        return "?"
-    return f"{int((now - ts) / 86400)}d"
+        return None
+    return time.time() - ts
+
+
+def _age_days(entry: dict[str, Any]) -> str:
+    if entry.get("worktree", {}).get("state") == "prunable":
+        return "stale"
+    seconds = _age_seconds(entry)
+    return f"{int(seconds / 86400)}d" if seconds is not None else "?"
+
+
+def _is_dirty(entry: dict[str, Any]) -> bool:
+    wtree = entry.get("working_tree", {})
+    return any(wtree.get(k) for k in ("staged", "modified", "untracked", "deleted", "renamed"))
 
 
 def _render_repo_worktrees(repo_root: Path, worktrees: list[dict[str, Any]]) -> int:
@@ -168,10 +192,8 @@ def _render_repo_worktrees(repo_root: Path, worktrees: list[dict[str, Any]]) -> 
         if w.get("is_current"):
             tags.append("[green][current][/]")
 
-        wtree = w.get("working_tree", {})
-        dirty = any(wtree.get(k) for k in ("staged", "modified", "untracked", "deleted", "renamed"))
         flags = []
-        if dirty:
+        if _is_dirty(w):
             flags.append("dirty")
         if w.get("main_state") in ("empty", "integrated"):
             flags.append("merged")
@@ -202,6 +224,11 @@ def cmd_list(
     if not repos:
         raise _fail("no known repos. Run 'coppice new' at least once, or pass a PATH.")
 
+    try:
+        wt.require_wt()
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+
     if as_json:
         import json
 
@@ -220,9 +247,58 @@ def cmd_list(
     console.print(f"Total: {total} worktree(s) across {len(repos)} repo(s).")
 
 
+def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[dict[str, Any]]]) -> list[str] | None:
+    """fzf multi-select picker over every removable worktree in SCOPE, for
+    `coppice remove` with no BRANCH given.
+
+    Falls back to printing the candidates and asking for an explicit re-run
+    when `fzf` isn't installed, rather than a pure-Python picker, to avoid a
+    new dependency for something already optional.
+
+    Returns None (caller exits 1) when there's nothing to pick, `fzf` isn't
+    installed, or the user cancels the picker.
+    """
+    candidates = [(repo_root, w) for repo_root in scope for w in removable[repo_root]]
+    if not candidates:
+        err.print("[red]Error:[/] no removable worktrees in scope.")
+        return None
+
+    if shutil.which("fzf") is None:
+        err.print("No BRANCH given and fzf isn't installed. Candidates in scope:")
+        for repo_root, w in candidates:
+            suffix = " (dirty)" if _is_dirty(w) else ""
+            err.print(f"  {w['branch']}  @ {repo_root.name}{suffix}")
+        err.print("Re-run: coppice remove BRANCH [--repo PATH]")
+        return None
+
+    # Prefix each line with its candidate index so the pick can be mapped
+    # back precisely even if two entries render an identical label (e.g.
+    # the same branch name in two different repos in scope); --with-nth
+    # hides that column from what fzf actually displays.
+    lines = [
+        f"{i}\t{w['branch']}  @ {repo_root.name}  ({_age_days(w)}{', dirty' if _is_dirty(w) else ''})"
+        for i, (repo_root, w) in enumerate(candidates)
+    ]
+    proc = subprocess.run(
+        ["fzf", "--prompt=Remove worktree(s)> ", "--height=~50%", "--multi", "--delimiter=\t", "--with-nth=2.."],
+        input="\n".join(lines) + "\n",
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        console.print("Cancelled.")
+        return None
+
+    picked = [int(line.split("\t", 1)[0]) for line in proc.stdout.splitlines() if line.strip()]
+    return [candidates[i][1]["branch"] for i in picked]
+
+
 @app.command("remove")
 def cmd_remove(
-    branches: Annotated[list[str], typer.Argument(help="Branch name(s) to remove.")],
+    branches: Annotated[
+        list[str] | None,
+        typer.Argument(help="Branch name(s) to remove. Omit for an interactive picker (needs fzf)."),
+    ] = None,
     repo_path: Annotated[
         str | None,
         typer.Option(
@@ -240,7 +316,8 @@ def cmd_remove(
     """Remove one or more worktrees by branch name.
 
     PATH is `--repo/-C` here (not a bare positional like `new`/`list`), since
-    a bare positional would be ambiguous with the BRANCH list.
+    a bare positional would be ambiguous with the BRANCH list. Omit BRANCH
+    entirely for an fzf multi-select picker scoped the same way.
     """
     try:
         scope = repo.scope_repos(repo_path)
@@ -250,20 +327,30 @@ def cmd_remove(
     if not scope:
         raise _fail("no known repos. Run 'coppice new' at least once, or pass --repo.")
 
+    try:
+        wt.require_wt()
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+
     # Removable worktrees per repo in scope: non-main, non-current (removing
     # the worktree you're standing in would have to switch away first, same
     # rule `wt` itself enforces).
-    removable: dict[Path, set[str]] = {}
+    removable: dict[Path, list[dict[str, Any]]] = {}
     for repo_root in scope:
-        removable[repo_root] = {
-            w["branch"]
+        removable[repo_root] = [
+            w
             for w in wt.list_worktrees(repo_root)
             if not w.get("is_main") and not w.get("is_current") and w.get("branch")
-        }
+        ]
+
+    if not branches:
+        branches = _pick_branches_interactively(scope, removable)
+        if not branches:
+            raise typer.Exit(1)
 
     failures: list[str] = []
     for branch_name in branches:
-        matches = [r for r in scope if branch_name in removable[r]]
+        matches = [r for r in scope if any(w["branch"] == branch_name for w in removable[r])]
         if not matches:
             err.print(f"[red]Error:[/] no worktree for branch '{branch_name}' found in scope.")
             failures.append(branch_name)
@@ -287,6 +374,207 @@ def cmd_remove(
         raise _fail(f"failed to remove: {', '.join(failures)}")
 
     console.print(f"Removed {len(branches)} worktree(s).")
+
+
+def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
+    main_state = entry.get("main_state")
+    if main_state in ("empty", "integrated"):
+        return "merged, branch will be deleted"
+    label = "unmerged, branch will be kept" if main_state == "ahead" else "merge status unknown, branch will be kept"
+    if force_delete and label.endswith("kept"):
+        return "unmerged, -D will delete the branch too"
+    return label
+
+
+@app.command("clean")
+def cmd_clean(
+    weeks: Annotated[
+        int, typer.Argument(help="Remove worktrees whose last commit/creation is older than this many weeks.")
+    ] = 2,
+    repo_path: Annotated[
+        str | None,
+        typer.Option(
+            "--repo", "-C", help="Scope to this repo. Defaults to the registry plus the repo you're standing in."
+        ),
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", "-n", help="List candidates without removing anything.")
+    ] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
+    force_delete: Annotated[
+        bool, typer.Option("--force-delete", "-D", help="Also delete unmerged branches (default: keep them).")
+    ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Also list worktrees under the age threshold, for context.")
+    ] = False,
+) -> None:
+    """Bulk-remove worktrees whose last commit is older than WEEKS (default: 2).
+
+    Scope is the shared registry plus the repo you're standing in, same as
+    'coppice list'/'coppice remove' default, or just --repo/-C PATH.
+
+    Skips: the main worktree, the current worktree, dirty worktrees, and
+    branches with an open GitHub PR (via 'gh', when installed). Reports an
+    on-disk size estimate per candidate, a total reclaimable size, and a
+    final removed/failed summary.
+    """
+    try:
+        scope = repo.scope_repos(repo_path)
+    except repo.RepoResolutionError as exc:
+        raise _fail(str(exc)) from exc
+
+    if not scope:
+        raise _fail("no known repos. Run 'coppice new' at least once, or pass --repo.")
+
+    try:
+        wt.require_wt()
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+
+    threshold_seconds = weeks * 7 * 86400
+    have_gh = shutil.which("gh") is not None
+
+    console.print(f"Scanning {len(scope)} repo(s) for worktrees older than {weeks}w...")
+
+    # (repo_root, branch, size_kb); size_kb is -1 for a stale/dangling entry
+    # (its directory is already gone, there's nothing to size).
+    candidates: list[tuple[Path, str, int]] = []
+    n_worktrees = n_young = n_dirty = n_pr = n_stale = 0
+
+    for repo_root in scope:
+        others = [
+            w
+            for w in wt.list_worktrees(repo_root)
+            if not w.get("is_main") and not w.get("is_current") and w.get("branch")
+        ]
+        if not others:
+            continue
+
+        lines: list[str] = []
+        for w in others:
+            n_worktrees += 1
+            branch_name = w["branch"]
+
+            if w.get("worktree", {}).get("state") == "prunable":
+                n_stale += 1
+                lines.append(
+                    f"  [green]rm[/]    stale  {branch_name}  (worktree directory is gone; cleaning up the dangling reference)"
+                )
+                candidates.append((repo_root, branch_name, -1))
+                continue
+
+            seconds = _age_seconds(w)
+            if seconds is None:
+                if verbose:
+                    lines.append(f"  keep  ?     {branch_name}  (age unknown)")
+                continue
+            age_days = int(seconds / 86400)
+
+            if seconds < threshold_seconds:
+                n_young += 1
+                if verbose:
+                    lines.append(f"  keep  {age_days}d  {branch_name}  (younger than {weeks}w)")
+                continue
+
+            if _is_dirty(w):
+                n_dirty += 1
+                lines.append(f"  [yellow]skip[/]  {age_days}d  {branch_name}  (uncommitted changes)")
+                continue
+
+            if have_gh and (pr_info := gh.open_pr(repo_root, branch_name)):
+                n_pr += 1
+                lines.append(f"  [yellow]skip[/]  {age_days}d  {branch_name}  (open PR {pr_info})")
+                continue
+
+            size_kb = sizes.dir_size_kb(Path(w["path"])) if w.get("path") else 0
+            merge_label = _merge_label(w, force_delete=force_delete)
+            lines.append(
+                f"  [green]rm[/]    {age_days}d  {branch_name}  ({sizes.human_kb(size_kb)} on disk, {merge_label})"
+            )
+            candidates.append((repo_root, branch_name, size_kb))
+
+        if lines:
+            console.print()
+            console.print(f"[bold]{repo_root.name}[/]:")
+            for line in lines:
+                console.print(line)
+
+    console.print()
+    stale_note = f", {n_stale} stale (dangling) reference(s)" if n_stale else ""
+    console.print(
+        f"Scanned {len(scope)} repo(s), {n_worktrees} worktree(s): {len(candidates)} removable, "
+        f"{n_dirty} dirty, {n_pr} with an open PR, {n_young} under {weeks}w old{stale_note}."
+    )
+
+    if not candidates:
+        console.print("Nothing to clean.")
+        return
+
+    total_kb = sum(size_kb for _, _, size_kb in candidates if size_kb > 0)
+    console.print(f"Total reclaimable: {sizes.human_kb(total_kb)} across {len(candidates)} worktree(s).")
+
+    if dry_run:
+        console.print("Dry run, nothing removed.")
+        return
+
+    if not yes and not typer.confirm(f"Remove {len(candidates)} worktree(s) above?", default=False):
+        console.print("Cancelled.")
+        raise typer.Exit(1)
+
+    n_removed = 0
+    failed: list[str] = []
+    for repo_root, branch_name, size_kb in candidates:
+        label = "stale reference" if size_kb < 0 else sizes.human_kb(size_kb)
+        console.print(f"Removing {branch_name} @ {repo_root.name} ({label})...")
+        try:
+            wt.remove(repo_root, branch_name, yes=True, force_delete=force_delete)
+        except (wt.WtNotFoundError, wt.WtCommandError) as exc:
+            err.print(f"[red]Error:[/] {exc}")
+            failed.append(f"{branch_name} @ {repo_root.name}")
+        else:
+            n_removed += 1
+
+    console.print()
+    if not failed:
+        console.print(f"Removed {n_removed} worktree(s).")
+    else:
+        err.print(f"[red]Removed {n_removed} worktree(s), {len(failed)} failed:[/]")
+        for f in failed:
+            err.print(f"  - {f}")
+        raise typer.Exit(1)
+
+
+@app.command("status")
+def cmd_status() -> None:
+    """Health check: is `wt` on PATH, and what's in the shared registry.
+
+    Deliberately minimal and generic (coppice#6): no project-specific tool
+    checks (e.g. herdr, code-review-graph) here, those belong outside
+    coppice for whichever project cares about them.
+    """
+    wt_path = shutil.which("wt")
+    if wt_path is not None:
+        version_proc = subprocess.run(["wt", "--version"], capture_output=True, text=True)
+        version = version_proc.stdout.strip() or version_proc.stderr.strip() or "unknown version"
+        console.print(f"wt: [green]found[/] ({version}) @ {wt_path}")
+    else:
+        console.print("wt: [red]not found[/] on PATH. See https://worktrunk.dev")
+
+    console.print()
+    known = repo.known_repos()
+    if not known:
+        console.print(f"Known repos ({repo.REGISTRY_PATH}): none yet. Run 'coppice new' at least once.")
+        return
+
+    console.print(f"Known repos ({repo.REGISTRY_PATH}):")
+    for repo_root in known:
+        if not repo_root.exists():
+            console.print(f"  {repo_root}  [red](missing)[/]")
+        elif wt_path is None:
+            console.print(f"  {repo_root}")
+        else:
+            count = len(wt.list_worktrees(repo_root))
+            console.print(f"  {repo_root}  ({count} worktree(s))")
 
 
 shell_app = typer.Typer(help="Shell integration, so 'coppice new' can cd you into the resulting worktree.")

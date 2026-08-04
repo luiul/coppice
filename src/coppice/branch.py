@@ -1,8 +1,8 @@
 """Branch-name helpers: turning a free-text description into a git-safe branch name.
 
-Ported from the normalization logic in dotfiles' `wtx` (`zsh/.zsh_config/funcs_wt.zsh`,
-`_wtx_new`), which `coppice` is meant to eventually replace. See
-https://github.com/luiul/dotfiles/issues/6.
+Same normalization rules `coppice new`'s interactive prompt has always used:
+lowercase, dash-joined, 40-character cap on a word boundary. See
+https://github.com/luiul/dotfiles/issues/6 for the original design.
 """
 
 from __future__ import annotations
