@@ -26,4 +26,5 @@ def test_templates_cover_zsh_and_bash():
     assert set(shell.TEMPLATES) == {"zsh", "bash"}
     for template in shell.TEMPLATES.values():
         assert "coppice()" in template
+        assert "cop()" in template
         assert "COPPICE_CD_FILE" in template

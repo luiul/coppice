@@ -13,10 +13,11 @@ Wire-up (zsh), see README:
 
     eval "$(coppice shell init zsh)"
 
-That defines a `coppice` shell function which shadows the real binary: it
-points `COPPICE_CD_FILE` at a temp file, runs `command coppice "$@"`, and if
-that file ends up non-empty (only `coppice new` ever writes to it, and only
-on success), `cd`s there before returning.
+That defines `coppice` and `cop` shell functions (both names install as real
+binaries, `cop` is just the shorter, more intuitive alias) which shadow the
+real binaries: each points `COPPICE_CD_FILE` at a temp file, runs `command
+<name> "$@"`, and if that file ends up non-empty (only `new` ever writes to
+it, and only on success), `cd`s there before returning.
 """
 
 from __future__ import annotations
@@ -28,10 +29,12 @@ CD_FILE_ENV_VAR = "COPPICE_CD_FILE"
 
 _ZSH_TEMPLATE = """\
 # coppice shell integration for zsh
-coppice() {
+_coppice_cd_wrapper() {
+  local bin="$1"
+  shift
   local cd_file
   cd_file="$(mktemp)"
-  COPPICE_CD_FILE="$cd_file" command coppice "$@"
+  COPPICE_CD_FILE="$cd_file" command "$bin" "$@"
   local exit_code=$?
   if [[ -s "$cd_file" ]]; then
     # `builtin cd` bypasses any user `cd` alias/function (e.g. zoxide's
@@ -41,14 +44,18 @@ coppice() {
   rm -f "$cd_file"
   return $exit_code
 }
+coppice() { _coppice_cd_wrapper coppice "$@"; }
+cop() { _coppice_cd_wrapper cop "$@"; }
 """
 
 _BASH_TEMPLATE = """\
 # coppice shell integration for bash
-coppice() {
+_coppice_cd_wrapper() {
+  local bin="$1"
+  shift
   local cd_file
   cd_file="$(mktemp)"
-  COPPICE_CD_FILE="$cd_file" command coppice "$@"
+  COPPICE_CD_FILE="$cd_file" command "$bin" "$@"
   local exit_code=$?
   if [[ -s "$cd_file" ]]; then
     builtin cd -- "$(cat "$cd_file")"
@@ -56,6 +63,8 @@ coppice() {
   rm -f "$cd_file"
   return $exit_code
 }
+coppice() { _coppice_cd_wrapper coppice "$@"; }
+cop() { _coppice_cd_wrapper cop "$@"; }
 """
 
 TEMPLATES = {"zsh": _ZSH_TEMPLATE, "bash": _BASH_TEMPLATE}

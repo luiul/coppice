@@ -27,6 +27,7 @@ Issues = "https://github.com/luiul/coppice/issues"
 
 [project.scripts]
 coppice = "coppice.cli:app"
+cop = "coppice.cli:app"
 
 [build-system]
 requires = ["hatchling"]

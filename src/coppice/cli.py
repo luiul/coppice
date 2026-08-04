@@ -5,11 +5,14 @@ subcommand takes an explicit PATH instead of relying on the current working
 directory, and `wt` itself stays the source of truth for worktree paths,
 hooks, and herdr registration, `coppice` only shells out to it and to `git`.
 
-Note: `coppice` is a plain executable, not a shell function, so it cannot
-change your shell's working directory on its own the way `wt`'s own shell
-integration does. Run `eval "$(coppice shell init zsh)"` in your shell rc
-file (see `coppice shell init --help`) to get the same behavior: `coppice
-new` will then `cd` you into the resulting worktree.
+Installed as two identical binaries, `coppice` and the shorter `cop` alias,
+both pointing at this same `app`; use whichever you like everywhere below.
+
+Note: `coppice`/`cop` is a plain executable, not a shell function, so it
+cannot change your shell's working directory on its own the way `wt`'s own
+shell integration does. Run `eval "$(coppice shell init zsh)"` in your shell
+rc file (see `coppice shell init --help`) to get the same behavior: `new`
+will then `cd` you into the resulting worktree.
 """
 
 from __future__ import annotations
@@ -31,11 +34,14 @@ from coppice import gh, repo, shell, sizes, wt
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
 
-[bold]Requires wt (worktrunk) on PATH[/], see https://worktrunk.dev. Bare
-[cyan]coppice PATH[/] is shorthand for [cyan]coppice new PATH[/].
+Also installed as [cyan]cop[/], a shorter alias for the same command, use
+whichever you prefer.
 
-Run [cyan]eval "$(coppice shell init zsh)"[/cyan] in your shell rc file so
-[cyan]coppice new[/cyan] can `cd` you into the resulting worktree.
+[bold]Requires wt (worktrunk) on PATH[/], see https://worktrunk.dev. Bare
+[cyan]cop PATH[/] is shorthand for [cyan]cop new PATH[/].
+
+Run [cyan]eval "$(cop shell init zsh)"[/cyan] in your shell rc file so
+[cyan]cop new[/cyan] can `cd` you into the resulting worktree.
 """
 
 
@@ -633,7 +639,7 @@ def cmd_status() -> None:
             console.print(f"  {repo_root}  ({count} worktree(s))")
 
 
-shell_app = typer.Typer(help="cd integration for 'coppice new' (see 'coppice shell init --help').")
+shell_app = typer.Typer(help="cd integration for 'new' (see 'coppice shell init --help'). Works for 'cop' too.")
 app.add_typer(shell_app, name="shell", rich_help_panel="Setup & diagnostics")
 
 
@@ -641,12 +647,13 @@ app.add_typer(shell_app, name="shell", rich_help_panel="Setup & diagnostics")
 def cmd_shell_init(
     shell_name: Annotated[str, typer.Argument(help="Shell to generate integration for.")] = "zsh",
 ) -> None:
-    """Print a shell function that wraps 'coppice' and 'cd's into worktrees 'coppice new' creates.
+    """Print shell functions that wrap 'coppice' and 'cop' and 'cd' into worktrees 'new' creates.
 
-    coppice is a plain executable, so it can't change your shell's working
-    directory on its own (only a shell function running in the same process
-    can). This prints a function that shadows the 'coppice' command: it runs
-    the real binary, then 'cd's if 'coppice new' recorded a resulting path.
+    coppice/cop is a plain executable, so it can't change your shell's
+    working directory on its own (only a shell function running in the same
+    process can). This prints functions that shadow both the 'coppice' and
+    'cop' commands: each runs the matching real binary, then 'cd's if 'new'
+    recorded a resulting path.
 
     Add this to your shell rc file:
 
