@@ -1,11 +1,11 @@
 """Repo resolution and the cross-repo registry `coppice` reads and writes.
 
-`coppice` doesn't own worktree placement or lifecycle, `wt` (worktrunk) does
-(see dotfiles issue #6). This module just resolves a user-supplied PATH to a
-repo root, and reads/writes the same `~/.cache/wt/known-repos` registry file
-that the worktrunk `registry` post-start hook already populates, so
-`coppice list`/`coppice remove` see every repo that hook (or `coppice new`'s
-own self-heal below) has touched.
+`coppice` doesn't own worktree placement or lifecycle, `wt` (worktrunk) does.
+This module just resolves a user-supplied PATH to a repo root, and
+reads/writes the same `~/.cache/wt/known-repos` registry file that the
+worktrunk `registry` post-start hook already populates, so `coppice
+list`/`coppice remove` see every repo that hook (or `coppice new`'s own
+self-heal below) has touched.
 """
 
 from __future__ import annotations

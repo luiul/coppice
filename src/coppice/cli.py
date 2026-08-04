@@ -1,9 +1,8 @@
 """coppice: a path-based CLI for git worktrees, built on top of `wt` (worktrunk).
 
-Design rationale in https://github.com/luiul/dotfiles/issues/6. Every
-subcommand takes an explicit PATH instead of relying on the current working
-directory, and `wt` itself stays the source of truth for worktree paths,
-hooks, and herdr registration, `coppice` only shells out to it and to `git`.
+Every subcommand takes an explicit PATH instead of relying on the current
+working directory, and `wt` itself stays the source of truth for worktree
+paths, hooks, and registration, `coppice` only shells out to it and to `git`.
 
 Installed as two identical binaries, `coppice` and the shorter `cop` alias,
 both pointing at this same `app`; use whichever you like everywhere below.
@@ -610,9 +609,8 @@ def cmd_clean(
 def cmd_status() -> None:
     """wt/registry health check.
 
-    Deliberately minimal and generic: no project-specific tool checks (e.g.
-    herdr, code-review-graph) here, those belong outside coppice for
-    whichever project cares about them.
+    Deliberately minimal and generic: no project-specific tool checks here,
+    those belong outside coppice for whichever project cares about them.
     """
     wt_path = shutil.which("wt")
     if wt_path is not None:

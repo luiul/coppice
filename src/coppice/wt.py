@@ -1,11 +1,11 @@
 """Thin subprocess wrapper around the `wt` (worktrunk) binary.
 
 `coppice` does not reimplement worktree lifecycle, hooks, or path templating,
-`wt` stays the single source of truth (dotfiles issue #6: worktree paths,
-hooks, and herdr registration are `wt`'s job, not something duplicated
-here). This module only shells out to `wt` and parses its `--format json` /
-`--json` output; every side effect (worktree paths, hooks, herdr
-registration) is `wt`'s own config.
+`wt` stays the single source of truth for all of that: worktree paths,
+hooks, and registration are `wt`'s job, not something duplicated here. This
+module only shells out to `wt` and parses its `--format json` / `--json`
+output; every side effect (worktree paths, hooks, registration) is `wt`'s
+own config.
 """
 
 from __future__ import annotations

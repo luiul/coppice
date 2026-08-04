@@ -1,8 +1,7 @@
 """Branch-name helpers: turning a free-text description into a git-safe branch name.
 
-Same normalization rules `coppice new`'s interactive prompt has always used:
-lowercase, dash-joined, 40-character cap on a word boundary. See
-https://github.com/luiul/dotfiles/issues/6 for the original design.
+Used by `coppice new`'s interactive prompt: lowercase, dash-joined,
+40-character cap on a word boundary.
 """
 
 from __future__ import annotations
