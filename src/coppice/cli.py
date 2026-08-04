@@ -17,11 +17,13 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 from rich.console import Console
+from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
 from coppice import gh, repo, shell, sizes, wt
@@ -29,31 +31,72 @@ from coppice import gh, repo, shell, sizes, wt
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
 
-[bold]Requires [bold]wt[/] (worktrunk) installed and on PATH[/], see
-https://worktrunk.dev. Every subcommand takes an explicit repo PATH instead
-of relying on the current working directory.
-
-[bold]Quickstart[/bold]
-
-  [cyan]coppice new ./tardis[/cyan]     Create/reuse a worktree for the repo at ./tardis
-  [cyan]coppice new .[/cyan]            ...for the repo you're standing in
-  [cyan]coppice list[/cyan]             List worktrees across every known repo
-  [cyan]coppice remove my-branch[/cyan] Remove a worktree by branch name
-  [cyan]coppice remove[/cyan]           ...or omit the branch for an fzf picker
-  [cyan]coppice clean[/cyan]            Bulk-remove worktrees older than 2 weeks
-  [cyan]coppice status[/cyan]           wt/registry health check
+[bold]Requires wt (worktrunk) on PATH[/], see https://worktrunk.dev. Bare
+[cyan]coppice PATH[/] is shorthand for [cyan]coppice new PATH[/].
 
 Run [cyan]eval "$(coppice shell init zsh)"[/cyan] in your shell rc file so
 [cyan]coppice new[/cyan] can `cd` you into the resulting worktree.
 """
 
+
+def _looks_like_path(value: str) -> bool:
+    """coppice#9's detection rule for treating a bare first argument as a
+    PATH (shorthand for 'coppice new PATH') rather than an unknown or
+    mistyped subcommand: starts with '.', '~/', or '/' (covers '.', '..',
+    './', '../', '~/', '/' in one prefix check), or is an existing
+    directory.
+    """
+    if value.startswith((".", "~/", "/")):
+        return True
+    return Path(value).expanduser().is_dir()
+
+
+class _PathShortcutGroup(TyperGroup):
+    """Makes a bare 'coppice PATH' shorthand for 'coppice new PATH' (coppice#9).
+
+    Only kicks in when the first argument doesn't already resolve to a real
+    subcommand, real subcommands always win, so this never shadows
+    'new'/'list'/'remove'/'clean'/'status'/'shell'. A mistyped subcommand
+    name that also doesn't look like a path (per `_looks_like_path`) still
+    gets Typer's normal "No such command" + suggestion instead of being
+    silently swallowed as a `new` invocation here.
+    """
+
+    def resolve_command(self, ctx, args):
+        if args and self.get_command(ctx, args[0]) is None and _looks_like_path(args[0]):
+            args = ["new", *args]
+        return super().resolve_command(ctx, args)
+
+
+def _version_callback(show_version: bool) -> None:
+    if not show_version:
+        return
+    try:
+        console.print(f"coppice {version('coppice')}")
+    except PackageNotFoundError:
+        console.print("coppice (version unknown, not installed as a package)")
+    raise typer.Exit()
+
+
 app = typer.Typer(
+    cls=_PathShortcutGroup,
     help=APP_HELP,
     no_args_is_help=True,
-    add_completion=False,
+    add_completion=True,
     context_settings={"help_option_names": ["-h", "--help"]},
     rich_markup_mode="rich",
 )
+
+
+@app.callback()
+def _main(
+    version_: Annotated[
+        bool,
+        typer.Option("--version", callback=_version_callback, is_eager=True, help="Show the version and exit."),
+    ] = False,
+) -> None:
+    pass
+
 
 console = Console()
 err = Console(stderr=True)
@@ -74,10 +117,10 @@ def _print_existing_worktrees(repo_root: Path) -> None:
         return
     console.print(f"Existing worktrees for [bold]{repo_root.name}[/]:")
     for w in others:
-        console.print(f"  {w.get('branch')}")
+        console.print(_format_worktree_line(w))
 
 
-@app.command("new")
+@app.command("new", rich_help_panel="Worktrees")
 def cmd_new(
     path: Annotated[str, typer.Argument(help="Repo to create/reuse a worktree in.")] = ".",
     branch: Annotated[
@@ -179,6 +222,29 @@ def _is_dirty(entry: dict[str, Any]) -> bool:
     return any(wtree.get(k) for k in ("staged", "modified", "untracked", "deleted", "renamed"))
 
 
+def _format_worktree_line(entry: dict[str, Any]) -> str:
+    """One display line for ENTRY: branch, age, [main]/[current] tags, and
+    dirty/merged flags. Shared by `list`'s per-repo rendering and `new`'s
+    pre-prompt "here's what's already in flight" preview, so a worktree
+    looks the same wherever `coppice` shows one.
+    """
+    tags = []
+    if entry.get("is_main"):
+        tags.append("[dim][main][/]")
+    if entry.get("is_current"):
+        tags.append("[green][current][/]")
+
+    flags = []
+    if _is_dirty(entry):
+        flags.append("dirty")
+    if entry.get("main_state") in ("empty", "integrated"):
+        flags.append("merged")
+
+    tag_str = f" {' '.join(tags)}" if tags else ""
+    flag_str = f" ({', '.join(flags)})" if flags else ""
+    return f"  {entry.get('branch')}  {_age_days(entry)}{tag_str}{flag_str}"
+
+
 def _render_repo_worktrees(repo_root: Path, worktrees: list[dict[str, Any]]) -> int:
     if not worktrees:
         return 0
@@ -186,26 +252,12 @@ def _render_repo_worktrees(repo_root: Path, worktrees: list[dict[str, Any]]) -> 
     console.print()
     console.print(f"[bold]{repo_root.name}[/]:")
     for w in worktrees:
-        tags = []
-        if w.get("is_main"):
-            tags.append("[dim][main][/]")
-        if w.get("is_current"):
-            tags.append("[green][current][/]")
-
-        flags = []
-        if _is_dirty(w):
-            flags.append("dirty")
-        if w.get("main_state") in ("empty", "integrated"):
-            flags.append("merged")
-
-        tag_str = f" {' '.join(tags)}" if tags else ""
-        flag_str = f" ({', '.join(flags)})" if flags else ""
-        console.print(f"  {w.get('branch')}  {_age_days(w)}{tag_str}{flag_str}")
+        console.print(_format_worktree_line(w))
 
     return len(worktrees)
 
 
-@app.command("list")
+@app.command("list", rich_help_panel="Worktrees")
 def cmd_list(
     path: Annotated[
         str | None,
@@ -293,7 +345,7 @@ def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[d
     return [candidates[i][1]["branch"] for i in picked]
 
 
-@app.command("remove")
+@app.command("remove", rich_help_panel="Worktrees")
 def cmd_remove(
     branches: Annotated[
         list[str] | None,
@@ -304,7 +356,7 @@ def cmd_remove(
         typer.Option(
             "--repo",
             "-C",
-            help="Scope to this repo. Defaults to the repo you're standing in, or every known repo.",
+            help="Scope to this repo. Defaults to the registry plus the repo you're standing in.",
         ),
     ] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip wt's own confirmation prompt.")] = False,
@@ -349,6 +401,7 @@ def cmd_remove(
             raise typer.Exit(1)
 
     failures: list[str] = []
+    n_removed = 0
     for branch_name in branches:
         matches = [r for r in scope if any(w["branch"] == branch_name for w in removable[r])]
         if not matches:
@@ -369,11 +422,16 @@ def cmd_remove(
         except (wt.WtNotFoundError, wt.WtCommandError) as exc:
             err.print(f"[red]Error:[/] {exc}")
             failures.append(branch_name)
+        else:
+            n_removed += 1
 
     if failures:
-        raise _fail(f"failed to remove: {', '.join(failures)}")
+        err.print(f"[red]Removed {n_removed} worktree(s), {len(failures)} failed:[/]")
+        for f in failures:
+            err.print(f"  - {f}")
+        raise typer.Exit(1)
 
-    console.print(f"Removed {len(branches)} worktree(s).")
+    console.print(f"Removed {n_removed} worktree(s).")
 
 
 def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
@@ -386,11 +444,9 @@ def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
     return label
 
 
-@app.command("clean")
+@app.command("clean", rich_help_panel="Worktrees")
 def cmd_clean(
-    weeks: Annotated[
-        int, typer.Argument(help="Remove worktrees whose last commit/creation is older than this many weeks.")
-    ] = 2,
+    weeks: Annotated[int, typer.Argument(help="Remove worktrees older than this many weeks.")] = 2,
     repo_path: Annotated[
         str | None,
         typer.Option(
@@ -408,7 +464,7 @@ def cmd_clean(
         bool, typer.Option("--verbose", "-v", help="Also list worktrees under the age threshold, for context.")
     ] = False,
 ) -> None:
-    """Bulk-remove worktrees whose last commit is older than WEEKS (default: 2).
+    """Bulk-remove worktrees older than WEEKS (default: 2).
 
     Scope is the shared registry plus the repo you're standing in, same as
     'coppice list'/'coppice remove' default, or just --repo/-C PATH.
@@ -525,7 +581,7 @@ def cmd_clean(
     failed: list[str] = []
     for repo_root, branch_name, size_kb in candidates:
         label = "stale reference" if size_kb < 0 else sizes.human_kb(size_kb)
-        console.print(f"Removing {branch_name} @ {repo_root.name} ({label})...")
+        console.print(f"Removing '{branch_name}' @ {repo_root.name} ({label})...")
         try:
             wt.remove(repo_root, branch_name, yes=True, force_delete=force_delete)
         except (wt.WtNotFoundError, wt.WtCommandError) as exc:
@@ -544,19 +600,19 @@ def cmd_clean(
         raise typer.Exit(1)
 
 
-@app.command("status")
+@app.command("status", rich_help_panel="Setup & diagnostics")
 def cmd_status() -> None:
-    """Health check: is `wt` on PATH, and what's in the shared registry.
+    """wt/registry health check.
 
-    Deliberately minimal and generic (coppice#6): no project-specific tool
-    checks (e.g. herdr, code-review-graph) here, those belong outside
-    coppice for whichever project cares about them.
+    Deliberately minimal and generic: no project-specific tool checks (e.g.
+    herdr, code-review-graph) here, those belong outside coppice for
+    whichever project cares about them.
     """
     wt_path = shutil.which("wt")
     if wt_path is not None:
         version_proc = subprocess.run(["wt", "--version"], capture_output=True, text=True)
-        version = version_proc.stdout.strip() or version_proc.stderr.strip() or "unknown version"
-        console.print(f"wt: [green]found[/] ({version}) @ {wt_path}")
+        wt_version = version_proc.stdout.strip() or version_proc.stderr.strip() or "unknown version"
+        console.print(f"wt: [green]found[/] ({wt_version}) @ {wt_path}")
     else:
         console.print("wt: [red]not found[/] on PATH. See https://worktrunk.dev")
 
@@ -577,8 +633,8 @@ def cmd_status() -> None:
             console.print(f"  {repo_root}  ({count} worktree(s))")
 
 
-shell_app = typer.Typer(help="Shell integration, so 'coppice new' can cd you into the resulting worktree.")
-app.add_typer(shell_app, name="shell")
+shell_app = typer.Typer(help="cd integration for 'coppice new' (see 'coppice shell init --help').")
+app.add_typer(shell_app, name="shell", rich_help_panel="Setup & diagnostics")
 
 
 @shell_app.command("init")

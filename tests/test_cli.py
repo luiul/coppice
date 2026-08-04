@@ -183,6 +183,23 @@ def test_remove_no_branch_no_candidates(tmp_path, monkeypatch):
     assert "no removable worktrees in scope" in result.output
 
 
+def test_remove_partial_failure_reports_both_counts(tmp_path, monkeypatch):
+    """On a partial failure, the summary must say how many succeeded, not
+    just list what failed (previously it only reported the failures).
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
+
+    result = runner.invoke(app, ["remove", "good-branch", "missing-branch", "--repo", str(repo_dir), "--yes"])
+
+    assert result.exit_code != 0
+    assert "Removed 1 worktree(s), 1 failed" in result.output
+    assert "missing-branch" in result.output
+
+
 def test_remove_no_branch_falls_back_without_fzf(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch, which={"fzf": None})
