@@ -3,7 +3,9 @@
 [![CI](https://github.com/luiul/coppice/actions/workflows/ci.yml/badge.svg)](https://github.com/luiul/coppice/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-A path-based CLI for managing git worktrees across every repo on your machine at once.
+A path-based CLI for managing git worktrees, built to parallelize work: several
+agents (and you) checked into the same repo at once, and every repo on your
+machine reachable from a single set of commands.
 
 Built on top of [`wt`](https://worktrunk.dev) (worktrunk), which does the
 actual worktree work (creating them, running hooks, etc.). `coppice` adds
@@ -13,23 +15,73 @@ just to check or clean up its worktrees.
 
 ## Why
 
-Worktrees let you have several branches checked out side by side, no
-stashing, no switching. The catch: once you're juggling worktrees across
-several repos, it's easy to lose track of what's checked out where, and
-stale ones quietly pile up on disk.
+Worktrees let you check out several branches side by side, no stashing, no
+switching. That matters more than ever now that work isn't just yours:
+you're often running one or more coding agents alongside your own edits,
+and each of them needs an isolated checkout to work in without stepping on
+the others. `coppice` makes spinning those up (and cleaning them back up)
+a one-liner, from anywhere, whether it's one repo or twenty.
 
+### Parallelize work in a single repo
+
+Each worktree is a full, isolated checkout sharing the same `.git` history,
+so a human and any number of agents can work the same repo at once, on
+different branches, without colliding:
+
+```mermaid
+flowchart TD
+    main(("main branch<br/>shared history"))
+
+    subgraph wtA["worktree · fix-auth"]
+        agentA["🤖 Agent A<br/>fixing the auth bug"]
+    end
+    subgraph wtB["worktree · add-metrics"]
+        agentB["🤖 Agent B<br/>instrumenting metrics"]
+    end
+    subgraph wtC["worktree · redesign-ui"]
+        you["🧑 You<br/>redesigning the UI"]
+    end
+
+    main --> wtA
+    main --> wtB
+    main --> wtC
+
+    classDef agent fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef human fill:#fef3c7,stroke:#d97706,color:#78350f;
+    classDef mainNode fill:#e5e7eb,stroke:#6b7280,color:#111827;
+    class agentA,agentB agent;
+    class you human;
+    class main mainNode;
 ```
-              ┌──────────────────────────────┐
-              │  coppice, run from anywhere  │
-              │ new · list · remove · clean  │
-              └──────────────────────────────┘
-                              │ shared registry of known repos
-        ┬─────────────────────┼─────────────────────┬
-        │                     │                     │
-   ~/code/api          ~/code/frontend        ~/code/infra
-      main                  main                  main
-   fix-auth *            new-navbar          wip-old (stale)
-   add-metrics            redesign
+
+`cop new ./api` (or a bare `cop ./api`) spins up the next one; `cop clean`
+sweeps up whichever ones are done, merged, and idle.
+
+### Reach every repo, from anywhere
+
+The catch with juggling worktrees across *several* repos: it's easy to
+lose track of what's checked out where, and stale ones quietly pile up on
+disk. `coppice` tracks every repo it's touched in a shared registry, so
+`list`/`clean` sweep across all of them, no matter which one you're
+standing in:
+
+```mermaid
+flowchart TD
+    cli[["coppice — run from anywhere<br/>new · list · remove · clean"]]
+    reg[("shared registry<br/>of known repos")]
+    api["repo: api"]
+    frontend["repo: frontend"]
+    infra["repo: infra"]
+
+    cli --> reg
+    reg --> api
+    reg --> frontend
+    reg --> infra
+
+    classDef cliNode fill:#dbeafe,stroke:#3b82f6,color:#1e3a8a;
+    classDef repoNode fill:#e5e7eb,stroke:#6b7280,color:#111827;
+    class cli cliNode;
+    class api,frontend,infra repoNode;
 ```
 
 Each command takes an explicit **path** (or defaults to every repo it
