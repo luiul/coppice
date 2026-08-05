@@ -127,7 +127,7 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     others = [w for w in worktrees if not w.get("is_main") and not w.get("is_current")]
     if not others:
         return
-    console.print(f"Existing worktrees for [bold]{repo_root.name}[/]:")
+    console.print(f"Existing worktrees for {_repo_header(repo_root)}:")
     table, _total_kb = _worktrees_table(others, show_size=False)
     console.print(table)
 
@@ -186,7 +186,10 @@ def cmd_new(
 
     verb = "Created" if result.get("action") == "created" else "Reused"
     result_path = result.get("path")
-    console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{result_path}[/]")
+    if result_path:
+        console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{_short_path(Path(result_path))}[/]")
+    else:
+        console.print(f"{verb} worktree for [bold]{branch}[/]")
 
     if result_path:
         shell.write_cd_file(Path(result_path))
@@ -250,6 +253,16 @@ def _short_path(path: Path, max_len: int = 48) -> str:
     return "\u2026" + s[-(max_len - 1) :]
 
 
+def _repo_header(repo_root: Path, path: Path | None = None) -> str:
+    """'[bold]name[/] [dim](short path)[/]' repo heading, the same shape
+    everywhere `coppice` introduces a repo's worktrees: `list`, `new`'s
+    pre-prompt preview, and `clean`'s per-repo scan results. PATH defaults
+    to REPO_ROOT itself; pass e.g. a main worktree's own path when it
+    differs (worktrees registered from a subdirectory, symlinks, etc.).
+    """
+    return f"[bold]{repo_root.name}[/] [dim]({_short_path(path or repo_root)})[/]"
+
+
 def _worktree_size_kb(entry: dict[str, Any], size_cache: dict[Path, int] | None = None) -> int | None:
     """On-disk size of ENTRY's worktree in KB, or None if unknown: a
     prunable/stale entry's directory is already gone, and an entry with no
@@ -301,8 +314,10 @@ def _merge_status(entry: dict[str, Any]) -> tuple[str, str]:
 def _worktrees_table(
     worktrees: list[dict[str, Any]], *, show_size: bool = True, size_cache: dict[Path, int] | None = None
 ) -> tuple[Table, int]:
-    """Rich table for WORKTREES: branch, [main]/[current] tags, age,
-    optionally on-disk size, working-tree cleanliness, and merge status.
+    """Rich table for WORKTREES: branch (with a dim '(main)' suffix where it
+    applies; 'current' is conveyed by the bold-green style instead of its
+    own column, one less repeated 'main current' per row), age, optionally
+    on-disk size, working-tree cleanliness, and merge status.
 
     Shared by `list`'s per-repo rendering and `new`'s pre-prompt "here's
     what's already in flight" preview, so a worktree looks the same wherever
@@ -311,9 +326,8 @@ def _worktrees_table(
     callers can roll up a total without walking each worktree's directory
     a second time.
     """
-    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False)
+    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Branch")
-    table.add_column("Tags")
     table.add_column("Age", justify="right")
     if show_size:
         table.add_column("Size", justify="right")
@@ -322,19 +336,14 @@ def _worktrees_table(
 
     total_kb = 0
     for w in worktrees:
-        tags = []
-        if w.get("is_main"):
-            tags.append("[dim]main[/]")
-        if w.get("is_current"):
-            tags.append("[green]current[/]")
-
         branch = w.get("branch") or "?"
-        branch_cell = f"[bold green]{branch}[/]" if w.get("is_current") else branch
+        suffix = " [dim](main)[/]" if w.get("is_main") else ""
+        branch_cell = f"[bold green]{branch}[/]{suffix}" if w.get("is_current") else f"{branch}{suffix}"
 
         working_tree = "[yellow]dirty[/]" if _is_dirty(w) else "[dim]clean[/]"
         merge_label, merge_style = _merge_status(w)
 
-        row = [branch_cell, " ".join(tags), _age_days(w)]
+        row = [branch_cell, _age_days(w)]
         if show_size:
             size_kb = _worktree_size_kb(w, size_cache)
             total_kb += size_kb or 0
@@ -354,13 +363,33 @@ def _render_repo_worktrees(
 ) -> tuple[int, int]:
     """Print ENTRY's table under a repo-name heading. Returns (worktree
     count, summed on-disk size in KB) for the caller's running total.
+
+    When WORKTREES is just the main one, nothing else is checked out and
+    there's nothing to review or clean, so this prints a single dim summary
+    line instead of a whole table, that's a header, a header-divider, and a
+    row repeated for every such repo otherwise, and it's the common case: it
+    lets the repos that actually have extra worktrees stand out.
     """
     if not worktrees:
         return 0, 0
 
-    table, total_kb = _worktrees_table(worktrees, show_size=show_size, size_cache=size_cache)
+    main_entry = next((w for w in worktrees if w.get("is_main")), None)
+    path = Path(main_entry["path"]) if main_entry and main_entry.get("path") else None
+    title = _repo_header(repo_root, path)
+
     console.print()
-    console.print(f"[bold]{repo_root.name}[/]")
+    if len(worktrees) == 1 and main_entry is not None:
+        size_kb = _worktree_size_kb(main_entry, size_cache) if show_size else None
+        bits = [main_entry.get("branch") or "?"]
+        if size_kb:
+            bits.append(sizes.human_kb(size_kb))
+        bits.append("[yellow]dirty[/]" if _is_dirty(main_entry) else "clean")
+        sep = "  \u00b7  "
+        console.print(f"{title} [dim]{sep.join(bits)}[/]")
+        return 1, size_kb or 0
+
+    table, total_kb = _worktrees_table(worktrees, show_size=show_size, size_cache=size_cache)
+    console.print(title)
     console.print(table)
     return len(worktrees), total_kb
 
@@ -561,7 +590,7 @@ def cmd_remove(
         if len(matches) > 1:
             err.print(f"[red]Error:[/] branch '{branch_name}' exists in multiple repos, disambiguate with --repo:")
             for m in matches:
-                err.print(f"  {m}")
+                err.print(f"  {_short_path(m)}")
             failures.append(branch_name)
             continue
 
@@ -787,7 +816,7 @@ def cmd_clean(
         repo_lines = lines_by_repo.get(repo_root)
         if repo_lines:
             console.print()
-            console.print(f"[bold]{repo_root.name}[/]:")
+            console.print(f"{_repo_header(repo_root)}:")
             for line in repo_lines:
                 console.print(line)
 
@@ -869,10 +898,12 @@ def cmd_status(
     console.print()
     known = repo.known_repos()
     if not known:
-        console.print(f"Known repos ({repo.REGISTRY_PATH}): none yet. Run 'coppice new' at least once.")
+        console.print(
+            f"Known repos [dim]({_short_path(repo.REGISTRY_PATH)})[/]: none yet. Run 'coppice new' at least once."
+        )
         return
 
-    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False)
+    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Repo", no_wrap=True)
     table.add_column("Worktrees", justify="right")
     if show_size:
@@ -936,7 +967,7 @@ def cmd_status(
 
         spinner.stop()
 
-    console.print(f"Known repos ({repo.REGISTRY_PATH}):")
+    console.print(f"Known repos [dim]({_short_path(repo.REGISTRY_PATH)})[/]:")
     console.print(table)
 
     if wt_path is not None:
