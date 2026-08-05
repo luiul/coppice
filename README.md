@@ -179,9 +179,7 @@ history:
 flowchart LR
     subgraph classic["Without worktrees — one directory, one branch at a time"]
         direction TB
-        subgraph dirC["~/dbt-models (working directory)"]
-            gitC[(".git/<br/>commit database")]
-        end
+        dirC["~/dbt-models (working directory)<br/>└─ .git/ — commit database"]
         onA["checked out: branch A"]
         stash["git switch B<br/>(stash/commit first)"]
         onB["checked out: branch B"]
@@ -190,31 +188,21 @@ flowchart LR
 
     subgraph worktrees["With worktrees — one .git, many directories"]
         direction TB
-        subgraph mainWt["~/dbt-models (main worktree) · branch A"]
-            gitW[(".git/<br/>commit database")]
-        end
-        subgraph wtB["~/dbt-models/.worktrees/B (linked worktree) · branch B"]
-            ptrB[".git file<br/>(pointer, not a copy)"]
-        end
-        subgraph wtC["~/dbt-models/.worktrees/C (linked worktree) · branch C"]
-            ptrC[".git file<br/>(pointer, not a copy)"]
-        end
-        gitW -. shared history .-> ptrB
-        gitW -. shared history .-> ptrC
+        mainWt["~/dbt-models (main worktree) · branch A<br/>└─ .git/ — commit database"]
+        wtB["~/dbt-models/.worktrees/B (linked worktree) · branch B<br/>└─ .git — pointer file, not a copy"]
+        wtC["~/dbt-models/.worktrees/C (linked worktree) · branch C<br/>└─ .git — pointer file, not a copy"]
+        mainWt -. shared history .-> wtB
+        mainWt -. shared history .-> wtC
     end
 
     classDef gitNode fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95;
     classDef stateNode fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#312e81;
     classDef actionNode fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12;
     classDef ptrNode fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46;
-    class gitC,gitW gitNode;
+    class dirC,mainWt gitNode;
     class onA,onB stateNode;
     class stash actionNode;
-    class ptrB,ptrC ptrNode;
-    style dirC fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
-    style mainWt fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
-    style wtB fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
-    style wtC fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
+    class wtB,wtC ptrNode;
 ```
 
 A worktree's identity is its directory, not its branch name; the branch
