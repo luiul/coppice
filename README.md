@@ -18,11 +18,14 @@ branches one at a time: stash, checkout, work, then stash again to switch
 back. That switching is sequential, even when the tasks themselves
 aren't.
 
-Git worktrees fix this: each branch gets its own directory, all sharing
+Git worktrees fix that: each branch gets its own directory, all sharing
 the same `.git` history, so several branches can be checked out at once
-instead of switched between. `coppice` makes creating and cleaning up
-those worktrees a one-liner, from anywhere on disk, whether that's one
-repo or twenty.
+instead of switched between. But `wt` (and raw `git worktree`) only
+operate on one repo, from inside it.
+
+**What `coppice` adds:** commands that create, list, and clean up
+worktrees as one-liners, from *anywhere* on disk, across *every* repo
+you've touched, not just the one you're standing in.
 
 ### Parallelize work in a single repo
 
@@ -132,12 +135,16 @@ home directory.
   and switching (`git switch`/`git checkout`) requires committing or
   stashing first.
 - **Worktree**: a separate directory on disk checked out to one branch,
-  linked to the same `.git` history as every other worktree of that repo.
-  Instead of a single directory that changes branches over time, each
-  worktree stays checked out to its own branch, so switching between them
-  is just changing directories, no stashing required. A repo's original
-  checkout, where `.git` itself lives, is its **main worktree**; every
-  additional one is a **linked worktree**.
+  linked to the same `.git` history as every other worktree of that repo
+  (see [One `.git`, many working directories](#one-git-many-working-directories)
+  below). A worktree's identity is its directory, not its branch, the
+  branch is just what it's checked out to; git refuses to check out the
+  same branch in two worktrees at once. Instead of a single directory
+  that changes branches over time, each worktree stays checked out to its
+  own branch, so switching between them is just changing directories, no
+  stashing required. A repo's original checkout, where `.git` itself
+  lives, is its **main worktree**; every additional one is a **linked
+  worktree**.
 - **Current worktree**: whichever one you happen to be standing in when
   you run a command, shown as `[current]` in `cop list`.
 - **Registry**: the shared list of repos `coppice`/`wt` have seen before
@@ -148,6 +155,56 @@ home directory.
   operates over. An explicit path (or `--repo`) scopes to just that one
   repo; omitting it defaults to every repo in the registry, plus the one
   you're standing in.
+
+### One `.git`, many working directories
+
+`.git` is the repo's actual database: every commit, branch, and the full
+history that ties them together. A normal checkout has exactly one
+working directory reading from it, so switching branches means mutating
+that one directory in place, stash or commit, then `git switch`, over
+and over. Worktrees add more working directories pointed at that *same*
+`.git`, each one checked out to a different branch at the same time, so
+switching is just `cd`, and a commit made in one is immediately visible
+from the others:
+
+```mermaid
+flowchart LR
+    subgraph classic["Without worktrees — one directory, one branch at a time"]
+        direction TB
+        gitC[(".git — commit history")]
+        dirC["~/dbt-models<br/>(single working directory)"]
+        onA["checked out: branch A"]
+        stash["git switch B<br/>(stash/commit first)"]
+        onB["checked out: branch B"]
+        gitC --> dirC --> onA --> stash --> onB
+    end
+
+    subgraph worktrees["With worktrees — one .git, many directories"]
+        direction TB
+        gitW[(".git — commit history")]
+        mainWt["~/dbt-models<br/>(main worktree) · branch A"]
+        wtB["~/dbt-models/.worktrees/B<br/>(linked worktree) · branch B"]
+        wtC["~/dbt-models/.worktrees/C<br/>(linked worktree) · branch C"]
+        gitW --> mainWt
+        gitW --> wtB
+        gitW --> wtC
+    end
+
+    classDef gitNode fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95;
+    classDef dirNode fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
+    classDef stateNode fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#312e81;
+    classDef actionNode fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12;
+    class gitC,gitW gitNode;
+    class dirC dirNode;
+    class onA,onB,mainWt,wtB,wtC stateNode;
+    class stash actionNode;
+```
+
+A worktree's identity is its directory, not its branch name; the branch
+is just what it's checked out to, set when the worktree is created (`cop
+new`/`git worktree add`). Git enforces the one constraint that makes this
+safe: the same branch can never be checked out in two worktrees at once,
+so `wtB` and `wtC` above are always on distinct branches.
 
 ### Worktree status: dirty, merged, stale
 
