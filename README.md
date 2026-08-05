@@ -7,33 +7,33 @@ A path-based CLI for managing git worktrees across every repo on your
 machine, from a single set of commands.
 
 Built on top of [`wt`](https://worktrunk.dev) (worktrunk), which does the
-actual worktree work (creating them, running hooks, etc.). `coppice` adds
-what `wt` doesn't: commands that reach across *all* your repos from
-*anywhere* on disk.
+actual worktree work: creating them, and running the hooks that turn a
+bare checkout into a set-up dev environment. `coppice` adds what `wt`
+doesn't: commands that reach across *all* your repos from *anywhere* on
+disk.
 
 ## Why
 
 Working on more than one thing in a repo usually means switching
-branches one at a time: stash, checkout, work, then stash again to switch
-back. That switching is sequential, even when the tasks themselves
-aren't.
+branches one at a time: stash, checkout, work, stash again. That's
+sequential even when the tasks aren't.
 
 Git worktrees fix that: each branch gets its own directory, all sharing
-the same `.git` history, so several branches can be checked out at once
-instead of switched between. But `wt` (and raw `git worktree`) only
-operate on one repo, from inside it.
+the same `.git` history, so several branches can be checked out at once.
+But `wt` (and raw `git worktree`) only operate on one repo, from inside
+it.
 
 **What `coppice` adds:** commands that create, list, and clean up
-worktrees as one-liners, from *anywhere* on disk, across *every* repo
-you've touched, not just the one you're standing in.
+worktrees as one-liners, from anywhere on disk, across every repo
+you've touched.
 
 ### Parallelize work in a single repo
 
-Each worktree is a full, isolated checkout that shares the same `.git`
+Each worktree is a full, isolated checkout sharing the same `.git`
 history, so a human and any number of agents can work on the same repo at
 once, each in their own directory: one agent adding a column, another
-fixing a DAG's schedule, you debugging a failing pipeline. None of them
-block each other, and none of them have to wait for a branch switch:
+fixing a DAG's schedule, you debugging a failing pipeline. No branch
+switching, no blocking each other:
 
 ```mermaid
 flowchart TD
@@ -85,11 +85,11 @@ are merged and idle.
 
 ### Reach every repo, from anywhere
 
-Juggling worktrees across *several* repos, your dbt project, your Airflow
+Juggling worktrees across several repos, your dbt project, your Airflow
 DAGs, your ingestion jobs, makes it easy to lose track of what's checked
-out where, and stale worktrees quietly pile up on disk. `coppice` tracks
-every repo it's touched in a shared registry, so `list`/`clean` sweep
-across all of them, no matter which one you're standing in:
+out where, and stale worktrees pile up unnoticed. `coppice` tracks every
+repo it's touched in a shared registry, so `list`/`clean` sweep across
+all of them, regardless of which one you're standing in:
 
 ```mermaid
 flowchart TD
@@ -117,63 +117,73 @@ flowchart TD
 The registry is what makes this possible: each command takes an explicit
 **path**, or defaults to every repo it already knows about, instead of
 relying on your current directory. `cop new ~/dbt-models` works the same
-whether you're standing in `~/dbt-models`, in `~/airflow-dags`, or in your
-home directory.
+from `~/dbt-models`, `~/airflow-dags`, or your home directory.
+
+### Automate everything that happens around a worktree
+
+A plain `git worktree add` gets you an empty checkout: no `.venv`, no
+editor window, no local `.env`. Closing that gap is `wt`'s job, and it's
+the other big reason coppice builds on `wt` instead of shelling out to
+raw git: `wt` runs user-defined **hooks**, shell commands fired at points
+in a worktree's life (`post-start`, `pre-remove`, and more), scoped to
+every repo or to one specific repo by URL. A `post-start` hook is what
+turns `cop new` from an empty checkout into a ready one every time, and
+it's also how coppice's own registry gets populated (see [How the
+registry works](#how-the-registry-works)).
+
+For real examples, see [my `wt`
+config](https://github.com/luiul/dotfiles/blob/main/worktrunk/.config/worktrunk/config.toml):
+`.venv` symlinking, copying gitignored config, opening an editor,
+project-scoped `dbt deps`, and a `pre-remove` guard against removing
+protected branches. Run `wt config create --project` to scaffold your
+own; see the [worktrunk hooks docs](https://worktrunk.dev) for the full
+reference.
 
 ## Concepts
 
-- **Repo**: a git repository, identified by its root directory, inside
-  which `.git` lives: the database of every commit and branch.
-  `coppice` works across as many repos as you have on disk, not just the
-  one you're standing in.
-- **Commit**: a snapshot of the repo's files at a point in time, plus a
-  pointer to its parent commit(s). Every worktree of a repo shares the same
-  history of commits; making a commit in one worktree makes it visible to
-  every other worktree of that repo immediately.
+- **Repo**: a git repository, identified by its root directory, where
+  `.git` lives: the database of every commit and branch. `coppice` works
+  across every repo on disk, not just the one you're standing in.
+- **Commit**: a snapshot of the repo's files, plus a pointer to its
+  parent commit(s). Every worktree of a repo shares the same commit
+  history, so a commit made in one worktree is visible in every other
+  worktree immediately.
 - **Branch**: a named pointer to a commit, e.g. `add-customer-id-column`.
-  It's cheap: git can have many branches with none of them checked out
-  anywhere. Normally you work on one branch at a time in one directory,
+  Cheap: git can have many branches with none checked out anywhere.
+  Without worktrees you work on one branch at a time in one directory,
   and switching (`git switch`/`git checkout`) requires committing or
   stashing first.
 - **Worktree**: a separate directory on disk checked out to one branch,
   reading from the same `.git` database as every other worktree of that
-  repo (see [One `.git`, many working directories](#one-git-many-working-directories)
-  below). Only the repo's original directory, its **main worktree**,
-  actually contains `.git`; every additional (**linked**) worktree just
-  holds a small `.git` file pointing back to it. A worktree's identity is
-  its directory, not its branch: the branch is just what it's checked out
-  to, and git refuses to check out the same branch in two worktrees at
-  once. Instead of a single directory that changes branches over time,
-  each worktree stays checked out to its own branch, so switching between
-  them is just changing directories, no stashing required.
+  repo (details in [One `.git`, many working
+  directories](#one-git-many-working-directories)). A worktree's identity
+  is its directory, not its branch: git refuses to check out the same
+  branch in two worktrees at once, so switching between worktrees is just
+  changing directories, no stashing required.
 - **Current worktree**: whichever one you happen to be standing in when
   you run a command, shown as `[current]` in `cop list`.
 - **Registry**: the shared list of repos `coppice`/`wt` have seen before
-  (`~/.cache/wt/known-repos`). It's what lets `cop list`/`cop remove`/`cop
-  clean` operate across every repo you've touched, not just the one
-  you're standing in.
+  (`~/.cache/wt/known-repos`), letting `cop list`/`remove`/`clean`
+  operate across every repo you've touched.
 - **Scope**: the set of repos a command like `list`/`remove`/`clean`
-  operates over. An explicit path (or `--repo`) scopes to just that one
-  repo; omitting it defaults to every repo in the registry, plus the one
-  you're standing in.
+  operates over: an explicit path (or `--repo`) scopes to just that
+  repo; omitting it defaults to every repo in the registry.
 
 ### One `.git`, many working directories
 
-`.git` is a **directory that's a database**: every commit, branch, and
-the full history that ties them together, stored as git's own object
-format, not plain files you'd edit directly. It lives *inside* your
-working directory, e.g. `~/dbt-models/.git`, sitting alongside the files
-you actually edit, not somewhere separate.
+`.git` is a **directory holding a database**: every commit, branch, and
+the history tying them together, stored in git's own object format
+rather than plain files. It lives *inside* your working directory, e.g.
+`~/dbt-models/.git`, alongside the files you actually edit.
 
-A normal checkout has exactly one working directory, with that one
-`.git` database inside it, so switching branches means mutating that
-same directory in place, stash or commit, then `git switch`, over and
-over. A worktree adds another working directory elsewhere on disk, but
-it doesn't get its own copy of `.git`; only the original directory (the
-**main worktree**) holds the real `.git` database. Every other
-(**linked**) worktree just contains a `.git` *file*, a few bytes of text
-pointing back at the main one, so all of them read and write the same
-history:
+A normal checkout has exactly one working directory with `.git` inside
+it, so switching branches means mutating that same directory in place:
+stash or commit, then `git switch`, over and over. A worktree adds
+another working directory elsewhere on disk, but not its own copy of
+`.git`; only the original directory (the **main worktree**) holds the
+real database. Every other (**linked**) worktree just holds a small
+`.git` *file* pointing back to it, so all of them read and write the
+same history:
 
 ```mermaid
 flowchart LR
@@ -205,11 +215,10 @@ flowchart LR
     class wtB,wtC ptrNode;
 ```
 
-A worktree's identity is its directory, not its branch name; the branch
-is just what it's checked out to, set when the worktree is created (`cop
-new`/`git worktree add`). Git enforces the one constraint that makes this
-safe: the same branch can never be checked out in two worktrees at once,
-so `wtB` and `wtC` above are always on distinct branches.
+A worktree's identity is its directory, not its branch; the branch is
+just what it's checked out to, set at creation (`cop new`/`git worktree
+add`). Git enforces the constraint that makes this safe: the same branch
+can never be checked out in two worktrees at once.
 
 ### Worktree status: dirty, merged, stale
 
@@ -228,9 +237,9 @@ Three states `cop list`/`cop clean` report on and act on differently:
 
 ### Branches vs. worktrees, in coppice's commands
 
-coppice identifies things by **branch name** where it can, since that's
-what you already think in, but what its commands actually create, list,
-or remove is that branch's **worktree**, not the branch itself:
+coppice identifies things by **branch name**, since that's what you
+think in, but what its commands actually create, list, or remove is
+that branch's **worktree**, not the branch itself:
 
 | Command | Takes | Does |
 |---|---|---|
@@ -295,7 +304,7 @@ eval "$(coppice shell init zsh)"   # or: bash
 This defines `coppice` and its shorter alias `cop` as shell functions,
 behaving identically; use whichever you prefer.
 
-Two more tools are auto-detected and used if present, neither is required:
+Two more tools are auto-detected, neither required:
 [`fzf`](https://github.com/junegunn/fzf) powers `cop remove`'s interactive
 picker, and [`gh`](https://cli.github.com) lets `cop clean` skip branches
 with an open PR. Without them, those features just degrade gracefully.
@@ -325,12 +334,13 @@ bare `cop PATH` is shorthand for `cop new PATH`.
 
 ### How the registry works
 
-`list`/`remove`/`clean` operate over a registry of "known repos"
+`list`/`remove`/`clean` operate over a registry of known repos
 (`~/.cache/wt/known-repos`), not just your current directory. It's
 populated automatically: by `wt`'s own `registry` post-start hook if
-configured, or otherwise by `coppice new` itself the first time it
-touches a repo. After that, the repo stays visible to every command from
-anywhere on disk.
+configured (see [Automate everything that happens around a
+worktree](#automate-everything-that-happens-around-a-worktree)), or
+otherwise by `coppice new` the first time it touches a repo. After that,
+the repo stays visible to every command from anywhere on disk.
 
 ### Shell integration, in more detail
 
@@ -340,10 +350,10 @@ never outlives the subprocess. (`wt` has the same problem, and solves it
 the same way, via `wt config shell install`.)
 
 `coppice shell init <zsh|bash>` prints wrapper functions that run the real
-binary with an env var pointed at a temp file, then `cd` there afterward
-if `new` wrote a path into it (only `new` does, and only on success).
-Without the wrapper, `new` still works; it just prints the resulting path
-instead of moving you there:
+binary with an env var pointing at a temp file, then `cd` there if `new`
+wrote a path into it (only `new` does, and only on success). Without the
+wrapper, `new` still works, it just prints the path instead of moving you
+there:
 
 ```bash
 cd "$(cop new . --branch update-dag-schedule | tail -1 | sed 's/.* @ //')"
