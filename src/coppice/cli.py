@@ -19,6 +19,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 import time
+from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated, Any
@@ -398,24 +399,22 @@ def cmd_list(
     if as_json:
         import json
 
+        worktrees_by_repo = wt.list_worktrees_many(repos)
         merged: list[dict[str, Any]] = []
         for repo_root in repos:
-            for entry in wt.list_worktrees(repo_root):
+            for entry in worktrees_by_repo[repo_root]:
                 merged.append({**entry, "repo": repo_root.name})
         console.print(json.dumps(merged))
         return
 
-    # `wt list` itself (one subprocess per repo) stays sequential, it's
-    # already fast; the slow part is on-disk sizing, which walks every
-    # worktree's directory. Fetch every repo's worktrees first, then size
-    # them all in one batch (with progress on the spinner) so that walk
-    # happens in parallel across every worktree in every repo instead of
-    # one at a time.
+    # Fetch every repo's worktrees concurrently (one `wt` subprocess per
+    # repo, overlapped rather than run one after another), then size them
+    # all in one batch (with progress on the spinner) so that walk happens
+    # in parallel across every worktree in every repo instead of one at a
+    # time.
     with console.status("[dim]Listing worktrees…[/dim]") as spinner:
-        worktrees_by_repo: dict[Path, list[dict[str, Any]]] = {}
-        for repo_root in repos:
-            spinner.update(f"[dim]Listing worktrees for {repo_root.name}…[/dim]")
-            worktrees_by_repo[repo_root] = wt.list_worktrees(repo_root)
+        spinner.update(f"[dim]Listing worktrees for {len(repos)} repo(s)…[/dim]")
+        worktrees_by_repo: dict[Path, list[dict[str, Any]]] = wt.list_worktrees_many(repos)
 
         size_cache: dict[Path, int] | None = None
         if show_size:
@@ -534,14 +533,17 @@ def cmd_remove(
 
     # Removable worktrees per repo in scope: non-main, non-current (removing
     # the worktree you're standing in would have to switch away first, same
-    # rule `wt` itself enforces).
-    removable: dict[Path, list[dict[str, Any]]] = {}
-    for repo_root in scope:
-        removable[repo_root] = [
+    # rule `wt` itself enforces). Fetched concurrently across repos, one
+    # `wt` subprocess per repo run overlapped rather than one after another.
+    worktrees_by_repo = wt.list_worktrees_many(scope)
+    removable: dict[Path, list[dict[str, Any]]] = {
+        repo_root: [
             w
-            for w in wt.list_worktrees(repo_root)
+            for w in worktrees_by_repo[repo_root]
             if not w.get("is_main") and not w.get("is_current") and w.get("branch")
         ]
+        for repo_root in scope
+    }
 
     if not branches:
         branches = _pick_branches_interactively(scope, removable)
@@ -664,16 +666,33 @@ def cmd_clean(
     candidates: list[tuple[Path, str, int]] = []
     n_worktrees = n_young = n_dirty = n_pr = n_stale = n_unmerged = 0
 
+    # Fetch every repo's worktrees concurrently (one `wt` subprocess per
+    # repo, overlapped rather than run one after another).
+    worktrees_by_repo = wt.list_worktrees_many(scope)
+
+    # Pass 1, per repo, local only (no subprocess): stale, too-young/
+    # unmerged, dirty. Whatever's left after those needs an open-PR check
+    # and an on-disk size, both of which used to happen one worktree at a
+    # time, in a single repo-by-repo loop, an open-PR check shells out to
+    # `gh` (a GitHub API round trip) and a size walks a whole directory
+    # tree, so doing either serially, or even just repo-by-repo, is what
+    # made scanning many worktrees across many repos slow. `lines` gets a
+    # None placeholder for each pending worktree so its line can be filled
+    # in later without disturbing the original per-worktree print order.
+    lines_by_repo: dict[Path, list[str | None]] = {}
+    pending_by_repo: dict[Path, list[tuple[int, dict[str, Any], str]]] = {}
+
     for repo_root in scope:
         others = [
             w
-            for w in wt.list_worktrees(repo_root)
+            for w in worktrees_by_repo.get(repo_root, [])
             if not w.get("is_main") and not w.get("is_current") and w.get("branch")
         ]
         if not others:
             continue
 
-        lines: list[str] = []
+        lines: list[str | None] = []
+        pending: list[tuple[int, dict[str, Any], str]] = []  # (line index, worktree, age_label)
         for w in others:
             n_worktrees += 1
             branch_name = w["branch"]
@@ -711,22 +730,65 @@ def cmd_clean(
                 lines.append(f"  [yellow]skip[/]  {age_label}  {branch_name}  (uncommitted changes)")
                 continue
 
-            if have_gh and (pr_info := gh.open_pr(repo_root, branch_name)):
-                n_pr += 1
-                lines.append(f"  [yellow]skip[/]  {age_label}  {branch_name}  (open PR {pr_info})")
-                continue
+            lines.append(None)
+            pending.append((len(lines) - 1, w, age_label))
 
-            size_kb = sizes.dir_size_kb(Path(w["path"])) if w.get("path") else 0
+        lines_by_repo[repo_root] = lines
+        pending_by_repo[repo_root] = pending
+
+    # Pass 2: one 'gh pr list' call per repo that has pending branches, run
+    # concurrently across every such repo (instead of one call per branch,
+    # run one repo after another).
+    pr_map_by_repo: dict[Path, dict[str, str]] = {}
+    pending_repos = [r for r, p in pending_by_repo.items() if p]
+    if have_gh and pending_repos:
+        with ThreadPoolExecutor(max_workers=min(len(pending_repos), 8)) as pool:
+            futures = {
+                r: pool.submit(gh.open_prs, r, [w["branch"] for _, w, _ in pending_by_repo[r]]) for r in pending_repos
+            }
+            pr_map_by_repo = {r: f.result() for r, f in futures.items()}
+
+    # Pass 3: resolve the PR checks, then size every worktree that survives
+    # them across *every* repo in one batch (one process pool sized to the
+    # machine's core count, instead of a fresh pool per repo run one repo at
+    # a time), so a scan across several repos gets the same parallelism as
+    # scanning one repo with the same total number of candidates.
+    kept_by_repo: dict[Path, list[tuple[int, dict[str, Any], str]]] = {}
+    all_kept_paths: list[Path] = []
+    for repo_root, pending in pending_by_repo.items():
+        pr_map = pr_map_by_repo.get(repo_root, {})
+        lines = lines_by_repo[repo_root]
+        kept: list[tuple[int, dict[str, Any], str]] = []
+        for idx, w, age_label in pending:
+            branch_name = w["branch"]
+            if pr_info := pr_map.get(branch_name):
+                n_pr += 1
+                lines[idx] = f"  [yellow]skip[/]  {age_label}  {branch_name}  (open PR {pr_info})"
+                continue
+            kept.append((idx, w, age_label))
+            if w.get("path"):
+                all_kept_paths.append(Path(w["path"]))
+        kept_by_repo[repo_root] = kept
+
+    size_cache = sizes.dir_sizes_kb(all_kept_paths) if all_kept_paths else {}
+
+    for repo_root, kept in kept_by_repo.items():
+        lines = lines_by_repo[repo_root]
+        for idx, w, age_label in kept:
+            branch_name = w["branch"]
+            size_kb = size_cache.get(Path(w["path"]), 0) if w.get("path") else 0
             merge_label = _merge_label(w, force_delete=force_delete)
-            lines.append(
+            lines[idx] = (
                 f"  [green]rm[/]    {age_label}  {branch_name}  ({sizes.human_kb(size_kb)} on disk, {merge_label})"
             )
             candidates.append((repo_root, branch_name, size_kb))
 
-        if lines:
+    for repo_root in scope:
+        repo_lines = lines_by_repo.get(repo_root)
+        if repo_lines:
             console.print()
             console.print(f"[bold]{repo_root.name}[/]:")
-            for line in lines:
+            for line in repo_lines:
                 console.print(line)
 
     console.print()
@@ -819,10 +881,33 @@ def cmd_status(
 
     total = 0
     total_kb = 0
-    with console.status("[dim]Checking known repos…[/dim]") as spinner:
-        for repo_root in known:
-            spinner.update(f"[dim]Checking {_short_path(repo_root)}…[/dim]")
 
+    # Only repos that actually exist and can be checked (wt installed) are
+    # worth a `wt list` call; everything else renders a fixed row below
+    # without touching the filesystem or a subprocess. Fetch every checkable
+    # repo's worktrees concurrently (one `wt` subprocess per repo,
+    # overlapped rather than run one after another), then size every one of
+    # their worktrees in a single combined batch, instead of a fresh
+    # process pool per repo processed one repo at a time.
+    checkable = [r for r in known if r.exists() and wt_path is not None]
+
+    with console.status("[dim]Checking known repos…[/dim]") as spinner:
+        worktrees_by_repo: dict[Path, list[dict[str, Any]]] = {}
+        if checkable:
+            spinner.update(f"[dim]Checking {len(checkable)} repo(s)…[/dim]")
+            worktrees_by_repo = wt.list_worktrees_many(checkable)
+
+        size_cache: dict[Path, int] = {}
+        if show_size and checkable:
+            all_paths = [p for r in checkable for p in _sizeable_paths(worktrees_by_repo[r])]
+            if all_paths:
+
+                def _report_progress(done: int, total_n: int) -> None:
+                    spinner.update(f"[dim]Sizing worktrees ({done}/{total_n})…[/dim]")
+
+                size_cache = sizes.dir_sizes_kb(all_paths, on_progress=_report_progress)
+
+        for repo_root in known:
             if not repo_root.exists():
                 row = [_short_path(repo_root), "-"]
                 if show_size:
@@ -839,16 +924,10 @@ def cmd_status(
                 table.add_row(*row)
                 continue
 
-            worktrees = wt.list_worktrees(repo_root)
+            worktrees = worktrees_by_repo.get(repo_root, [])
             total += len(worktrees)
             row = [_short_path(repo_root), str(len(worktrees))]
             if show_size:
-                sizeable = _sizeable_paths(worktrees)
-
-                def _report_progress(done: int, n_sizeable: int, name: str = repo_root.name) -> None:
-                    spinner.update(f"[dim]Sizing {name} ({done}/{n_sizeable})…[/dim]")
-
-                size_cache = sizes.dir_sizes_kb(sizeable, on_progress=_report_progress)
                 size_kb = sum(s for w in worktrees if (s := _worktree_size_kb(w, size_cache)) is not None)
                 total_kb += size_kb
                 row.append(sizes.human_kb(size_kb))

@@ -5,7 +5,7 @@ traceback, regardless of which `wt`-calling code path a command happens to
 hit first.
 
 Also covers `clean`/`remove`'s picker/`status`, all synthesized against
-fake `wt.list_worktrees`/`gh.open_pr` results rather than a real `wt`/`gh`
+fake `wt.list_worktrees`/`gh.open_prs` results rather than a real `wt`/`gh`
 install, so these pass in CI the same as locally.
 """
 
@@ -140,7 +140,9 @@ def test_clean_dry_run_categorizes_candidates(tmp_path, monkeypatch):
         _entry("main", tmp_path / "repo", is_main=True),
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
-    monkeypatch.setattr(gh, "open_pr", lambda _repo, branch: "#42 Some PR" if branch == "pr-branch" else None)
+    monkeypatch.setattr(
+        gh, "open_prs", lambda _repo, branches: {"pr-branch": "#42 Some PR"} if "pr-branch" in branches else {}
+    )
 
     result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--dry-run", "--verbose"])
 

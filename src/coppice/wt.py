@@ -13,6 +13,8 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -62,6 +64,30 @@ def list_worktrees(repo: Path) -> list[dict[str, Any]]:
     if proc.returncode != 0 or not proc.stdout.strip():
         return []
     return _load_json(proc.stdout)
+
+
+def list_worktrees_many(repos: Iterable[Path]) -> dict[Path, list[dict[str, Any]]]:
+    """`list_worktrees` for every REPO in REPOS, run concurrently.
+
+    Each call is one `wt` subprocess invocation per repo; a thread pool (not
+    a process pool, unlike `sizes.dir_sizes_kb`) is enough to overlap them,
+    this call spends its whole time blocked in `subprocess.run` waiting on
+    the child `wt` process, not holding the GIL doing Python-level work, so
+    threads overlap N subprocesses' wait time instead of a caller serializing
+    them one repo after another (which is what every multi-repo command used
+    to do). Capped at 8 concurrent `wt` invocations so a large registry
+    doesn't fork an unbounded number of subprocesses at once.
+
+    Dedupes REPOS first (callers may pass the same repo twice, e.g. it's both
+    registered and the one you're standing in), and skips the pool entirely
+    for 0 or 1 repos, there's nothing to overlap.
+    """
+    unique = list(dict.fromkeys(repos))
+    if len(unique) <= 1:
+        return {r: list_worktrees(r) for r in unique}
+    with ThreadPoolExecutor(max_workers=min(len(unique), 8)) as pool:
+        futures = {r: pool.submit(list_worktrees, r) for r in unique}
+        return {r: f.result() for r, f in futures.items()}
 
 
 def branch_exists(repo: Path, branch: str) -> bool:
