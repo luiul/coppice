@@ -938,8 +938,10 @@ def cmd_status(
 
                 size_cache = sizes.dir_sizes_kb(all_paths, on_progress=_report_progress)
 
+        missing: list[Path] = []
         for repo_root in known:
             if not repo_root.exists():
+                missing.append(repo_root)
                 row = [_short_path(repo_root), "-"]
                 if show_size:
                     row.append("-")
@@ -970,8 +972,18 @@ def cmd_status(
     console.print(f"Known repos [dim]({_short_path(repo.REGISTRY_PATH)})[/]:")
     console.print(table)
 
+    # Registered repos vanish for reasons coppice doesn't control (a
+    # scratch repo removed by hand, a `wt`-hook-registered temp repo whose
+    # OS temp dir got reaped, a project simply deleted/moved). There's
+    # nothing to preserve by keeping a dead entry around, it would just
+    # keep showing up here, so self-heal the registry every time `status`
+    # runs instead of letting `missing` rows accumulate forever.
+    if missing:
+        repo.prune_missing_repos()
+        console.print(f"[dim]Pruned {len(missing)} missing repo(s) from the registry.[/]")
+
     if wt_path is not None:
-        summary = f"Total: {total} worktree(s) across {len(known)} repo(s)."
+        summary = f"Total: {total} worktree(s) across {len(known) - len(missing)} repo(s)."
         if show_size and total_kb:
             summary += f" {sizes.human_kb(total_kb)} on disk."
         console.print(summary)

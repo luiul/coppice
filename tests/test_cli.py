@@ -277,3 +277,31 @@ def test_status_without_wt_still_lists_registry(tmp_path, monkeypatch):
     flat_output = result.output.replace("\n", "")
     assert "not found" in flat_output
     assert cli._short_path(repo_dir) in flat_output
+
+
+def test_status_prunes_missing_repos_from_registry(tmp_path, monkeypatch):
+    """A registered repo whose directory is gone (e.g. a deleted scratch
+    repo, or one a `wt` hook registered that later got cleaned up) shows as
+    `missing` for this run, but `status` self-heals the registry so it
+    doesn't show up on every subsequent run forever.
+    """
+    registry_path = tmp_path / "known-repos"
+    monkeypatch.setattr(repo, "REGISTRY_PATH", registry_path)
+    repo_dir = _init_repo(tmp_path / "repo")
+    gone_dir = tmp_path / "gone"
+    gone_dir.mkdir()
+    repo.register_repo(repo_dir)
+    repo.register_repo(gone_dir)
+    gone_dir.rmdir()
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "wt v9.9.9\n", ""))
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [{"branch": "main"}])
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    flat_output = result.output.replace("\n", "")
+    assert "missing" in flat_output
+    assert "Pruned 1 missing repo(s)" in flat_output
+    assert "1 repo(s)" in flat_output  # only the live repo counted, not the pruned one
+    assert repo.known_repos() == [repo_dir]

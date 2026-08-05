@@ -59,6 +59,31 @@ def register_repo(repo: Path) -> None:
     REGISTRY_PATH.write_text("\n".join(sorted(repos)) + "\n")
 
 
+def prune_missing_repos() -> list[Path]:
+    """Drop registered repos whose path no longer exists on disk, rewriting
+    the registry, and return what got dropped.
+
+    Registered repos can vanish for reasons `coppice` has no control over:
+    a scratch repo removed by hand, a `wt`-hook-registered temp repo whose
+    OS temp dir got reaped, a project directory that was simply deleted or
+    moved. None of that is reversible, so there's nothing to preserve by
+    keeping the entry around, it would just show up as a permanent
+    `missing` row in `coppice status` (and a wasted `wt` subprocess call in
+    `list`/`remove`/`clean`) until someone edits the registry file by hand.
+    Called on every scope resolution so the registry self-heals on its own
+    over time instead of accumulating dead entries.
+    """
+    repos = known_repos()
+    missing = [r for r in repos if not r.exists()]
+    if missing:
+        remaining = {str(r) for r in repos if r.exists()}
+        if remaining:
+            REGISTRY_PATH.write_text("\n".join(sorted(remaining)) + "\n")
+        else:
+            REGISTRY_PATH.unlink(missing_ok=True)
+    return missing
+
+
 def scope_repos(path: str | None) -> list[Path]:
     """Resolve the set of repos a scope-taking command should operate over.
 
@@ -69,6 +94,7 @@ def scope_repos(path: str | None) -> list[Path]:
     if path is not None:
         return [resolve_repo_root(path)]
 
+    prune_missing_repos()
     repos = known_repos()
     try:
         cwd_repo = resolve_repo_root(".")

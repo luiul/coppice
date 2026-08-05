@@ -44,3 +44,55 @@ def test_registry_roundtrip(tmp_path, monkeypatch):
 def test_scope_repos_with_explicit_path(tmp_path):
     checkout = _init_repo(tmp_path / "repo")
     assert repo.scope_repos(str(checkout)) == [checkout]
+
+
+def test_prune_missing_repos_drops_deleted_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+
+    alive = tmp_path / "alive"
+    alive.mkdir()
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    repo.register_repo(alive)
+    repo.register_repo(gone)
+    gone.rmdir()
+
+    pruned = repo.prune_missing_repos()
+
+    assert pruned == [gone]
+    assert repo.known_repos() == [alive]
+
+
+def test_prune_missing_repos_removes_registry_file_when_all_gone(tmp_path, monkeypatch):
+    registry_path = tmp_path / "known-repos"
+    monkeypatch.setattr(repo, "REGISTRY_PATH", registry_path)
+
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    repo.register_repo(gone)
+    gone.rmdir()
+
+    assert repo.prune_missing_repos() == [gone]
+    assert not registry_path.exists()
+
+
+def test_scope_repos_self_heals_missing_entries(tmp_path, monkeypatch):
+    """`scope_repos` (used by list/remove/clean) drops dead registry
+    entries as a side effect, same as `coppice status` does explicitly, so
+    a repo deleted outside `coppice` doesn't keep costing a wasted `wt`
+    subprocess call (or, for `status`, a permanent `missing` row) forever.
+    """
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+
+    checkout = _init_repo(tmp_path / "repo")
+    gone = tmp_path / "gone"
+    gone.mkdir()
+    repo.register_repo(checkout)
+    repo.register_repo(gone)
+    gone.rmdir()
+
+    result = repo.scope_repos(None)
+
+    assert gone not in result
+    assert checkout in result
+    assert repo.known_repos() == [checkout]
