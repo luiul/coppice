@@ -20,7 +20,6 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated, Any
@@ -133,57 +132,9 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     console.print(table)
 
 
-def _relative_subdir(path: str, repo_root: Path) -> Path | None:
-    """The subdirectory PATH points at, relative to REPO_ROOT, e.g. one
-    project's own directory in a monorepo. None when PATH resolves to the
-    repo root itself, the common case, where there's no offset to preserve.
-
-    `wt switch` only ever reports the new worktree's *root* (`{{
-    worktree_path }}` in its own hook templates has no notion of "the
-    subdirectory PATH was invoked from" either), so PATH's own position
-    under REPO_ROOT is the only place this offset is still known once
-    `coppice new` calls out to `wt`; `_resolve_target_path` re-applies it
-    against the new worktree's root afterward.
-    """
-    target = Path(path).expanduser().resolve()
-    try:
-        rel = target.relative_to(repo_root.resolve())
-    except ValueError:
-        return None
-    return rel if str(rel) != "." else None
-
-
-def _resolve_target_path(result_path: str, subdir: Path | None) -> Path:
-    """Where 'coppice new' should actually land you: RESULT_PATH (the new
-    worktree's root, as `wt switch` reports it) plus SUBDIR, if `wt` was
-    pointed at a subdirectory of the repo and that subdirectory actually
-    exists in the new worktree (skips it otherwise, e.g. a project added on
-    this branch after the worktree's base commit).
-    """
-    root = Path(result_path)
-    if subdir is None:
-        return root
-    candidate = root / subdir
-    return candidate if candidate.is_dir() else root
-
-
-def _open_in_vscode(path: Path) -> None:
-    """Open PATH in a new VS Code window via the `code` CLI, best-effort.
-
-    Auto-detected like `fzf`/`gh` elsewhere in `coppice`: a silent no-op
-    when `code` isn't on PATH, and a hiccup here (VS Code slow to respond,
-    CLI misbehaving) never fails 'coppice new' itself, the worktree is
-    already created either way.
-    """
-    if shutil.which("code") is None:
-        return
-    with suppress(OSError, subprocess.TimeoutExpired):
-        subprocess.run(["code", "-n", str(path)], capture_output=True, timeout=10)
-
-
 @app.command("new", rich_help_panel="Worktrees")
 def cmd_new(
-    path: Annotated[str, typer.Argument(help="Repo (or a subdirectory of one) to create/reuse a worktree in.")] = ".",
+    path: Annotated[str, typer.Argument(help="Repo to create/reuse a worktree in.")] = ".",
     branch: Annotated[
         str | None,
         typer.Option("--branch", "-b", help="Branch name. Prompts for a short description if omitted."),
@@ -192,23 +143,8 @@ def cmd_new(
         str | None,
         typer.Option("--base", "-B", help="Base branch/ref to create from. Defaults to wt's own default branch."),
     ] = None,
-    open_code: Annotated[
-        bool,
-        typer.Option(
-            "--code/--no-code",
-            help="Open the worktree in a new VS Code window via the `code` CLI, if installed. On by default.",
-        ),
-    ] = True,
 ) -> None:
     """Create or reuse a worktree for the repo at PATH.
-
-    PATH can be a subdirectory of the repo, not just its root, e.g. one
-    project's own directory in a monorepo: the worktree still gets created
-    at the repo's root (that's where `wt` operates), but the terminal
-    lands, and VS Code opens, in the *matching subdirectory* of the new
-    worktree, mirroring PATH's position under the repo root, not just its
-    root, so 'coppice new some/deep/project-dir' picks back up exactly
-    where you pointed it.
 
     Examples:
         coppice new ./tardis
@@ -218,8 +154,6 @@ def cmd_new(
         repo_root = repo.resolve_repo_root(path)
     except repo.RepoResolutionError as exc:
         raise _fail(str(exc)) from exc
-
-    subdir = _relative_subdir(path, repo_root)
 
     try:
         wt.require_wt()
@@ -252,16 +186,13 @@ def cmd_new(
 
     verb = "Created" if result.get("action") == "created" else "Reused"
     result_path = result.get("path")
-    target_path = _resolve_target_path(result_path, subdir) if result_path else None
-    if target_path is not None:
-        console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{_short_path(target_path)}[/]")
+    if result_path:
+        console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{_short_path(Path(result_path))}[/]")
     else:
         console.print(f"{verb} worktree for [bold]{branch}[/]")
 
-    if target_path is not None:
-        shell.write_cd_file(target_path)
-        if open_code:
-            _open_in_vscode(target_path)
+    if result_path:
+        shell.write_cd_file(Path(result_path))
 
 
 def _creation_ts(path: Path) -> float | None:
