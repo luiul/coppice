@@ -311,10 +311,13 @@ eval "$(coppice shell init zsh)"   # or: bash
 This defines `coppice` and its shorter alias `cop` as shell functions,
 behaving identically; use whichever you prefer.
 
-Two more tools are auto-detected, neither required:
+Three more tools are auto-detected, none required:
 [`fzf`](https://github.com/junegunn/fzf) powers `cop remove`'s interactive
-picker, and [`gh`](https://cli.github.com) lets `cop clean` skip branches
-with an open PR. Without them, those features just degrade gracefully.
+picker, [`gh`](https://cli.github.com) lets `cop clean` skip branches
+with an open PR, and VS Code's [`code`
+CLI](https://code.visualstudio.com/docs/configure/command-line) opens a
+new window on every `cop new` (pass `--no-code` to skip). Without them,
+those features just degrade gracefully.
 
 ## Usage
 
@@ -322,6 +325,8 @@ with an open PR. Without them, those features just degrade gracefully.
 cop new ~/dbt-models                     # create branch + worktree for the repo at ~/dbt-models (or reuse it)
 cop new .                                # ...for the repo you're standing in
 cop new . --branch update-dag-schedule   # skip the prompt, use a specific branch name
+cop new ~/dbt-models/pipelines/marketing/attribution  # a project deep inside a monorepo: lands you (and VS Code) in the matching subdirectory of the new worktree, not just its root
+cop new . --no-code                      # skip opening VS Code even if `code` is on PATH
 cop list                                 # table of worktrees (age, size, dirty/merge status) across every known repo
 cop list ~/dbt-models                    # ...just this one
 cop list --no-size                       # skip the (directory-walking) size column, for a faster listing
