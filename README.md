@@ -244,9 +244,10 @@ with an open PR. Without them, those features just degrade gracefully.
 cop new ~/dbt-models                     # create branch + worktree for the repo at ~/dbt-models (or reuse it)
 cop new .                                # ...for the repo you're standing in
 cop new . --branch update-dag-schedule   # skip the prompt, use a specific branch name
-cop list                                 # list worktrees (not all branches) across every known repo
+cop list                                 # table of worktrees (age, size, dirty/merge status) across every known repo
 cop list ~/dbt-models                    # ...just this one
-cop list --json                          # same, as JSON
+cop list --no-size                       # skip the (directory-walking) size column, for a faster listing
+cop list --json                          # same data, as JSON
 cop remove add-customer-id-column        # remove a worktree by branch name (branch itself kept unless merged/-D)
 cop remove a b --repo dbt-models --yes
 cop remove                               # ...or omit the branch for an fzf multi-select picker
@@ -254,7 +255,7 @@ cop clean --dry-run                      # preview worktrees (not branches) olde
 cop clean --yes                          # remove them (skips dirty worktrees and ones with an open PR)
 cop clean --merged                       # sweep every worktree on a merged branch instead, regardless of age
 cop clean 7 --repo dbt-models --merged   # ...scoped to one repo, merged only
-cop status                               # is wt on PATH, what's in the shared registry
+cop status                               # is wt on PATH, table of the shared registry (worktree count, size, health)
 ```
 
 Run `cop --help` or `cop <command> --help` for the full option list. A
