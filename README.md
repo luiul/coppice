@@ -141,11 +141,11 @@ home directory.
   below). Only the repo's original directory, its **main worktree**,
   actually contains `.git`; every additional (**linked**) worktree just
   holds a small `.git` file pointing back to it. A worktree's identity is
-  its directory, not its branch, the branch is just what it's checked out
-  to; git refuses to check out the same branch in two worktrees at once.
-  Instead of a single directory that changes branches over time, each
-  worktree stays checked out to its own branch, so switching between them
-  is just changing directories, no stashing required.
+  its directory, not its branch: the branch is just what it's checked out
+  to, and git refuses to check out the same branch in two worktrees at
+  once. Instead of a single directory that changes branches over time,
+  each worktree stays checked out to its own branch, so switching between
+  them is just changing directories, no stashing required.
 - **Current worktree**: whichever one you happen to be standing in when
   you run a command, shown as `[current]` in `cop list`.
 - **Registry**: the shared list of repos `coppice`/`wt` have seen before
