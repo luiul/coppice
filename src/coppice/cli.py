@@ -314,10 +314,16 @@ def _merge_status(entry: dict[str, Any]) -> tuple[str, str]:
 def _worktrees_table(
     worktrees: list[dict[str, Any]], *, show_size: bool = True, size_cache: dict[Path, int] | None = None
 ) -> tuple[Table, int]:
-    """Rich table for WORKTREES: branch (with a dim '(main)' suffix where it
-    applies; 'current' is conveyed by the bold-green style instead of its
-    own column, one less repeated 'main current' per row), age, optionally
-    on-disk size, working-tree cleanliness, and merge status.
+    """Rich table for WORKTREES: branch ('current' is conveyed by the
+    bold-green style instead of its own column, one less repeated 'current'
+    per row), age, optionally on-disk size, working-tree cleanliness, and
+    merge status.
+
+    Callers are expected to have already filtered out the main worktree
+    (see `_render_repo_worktrees`/`_print_existing_worktrees`): it isn't a
+    worktree coppice manages, it's the repo itself, so it never gets a row
+    here, unlike every other entry which is something `remove`/`clean`
+    could act on.
 
     Shared by `list`'s per-repo rendering and `new`'s pre-prompt "here's
     what's already in flight" preview, so a worktree looks the same wherever
@@ -337,8 +343,7 @@ def _worktrees_table(
     total_kb = 0
     for w in worktrees:
         branch = w.get("branch") or "?"
-        suffix = " [dim](main)[/]" if w.get("is_main") else ""
-        branch_cell = f"[bold green]{branch}[/]{suffix}" if w.get("is_current") else f"{branch}{suffix}"
+        branch_cell = f"[bold green]{branch}[/]" if w.get("is_current") else branch
 
         working_tree = "[yellow]dirty[/]" if _is_dirty(w) else "[dim]clean[/]"
         merge_label, merge_style = _merge_status(w)
@@ -361,14 +366,21 @@ def _render_repo_worktrees(
     show_size: bool = True,
     size_cache: dict[Path, int] | None = None,
 ) -> tuple[int, int]:
-    """Print ENTRY's table under a repo-name heading. Returns (worktree
-    count, summed on-disk size in KB) for the caller's running total.
+    """Print WORKTREES under a repo-name heading. Returns (worktree count,
+    summed on-disk size in KB) for the caller's running total.
 
-    When WORKTREES is just the main one, nothing else is checked out and
-    there's nothing to review or clean, so this prints a single dim summary
-    line instead of a whole table, that's a header, a header-divider, and a
-    row repeated for every such repo otherwise, and it's the common case: it
-    lets the repos that actually have extra worktrees stand out.
+    The main worktree is the repo itself, not something coppice manages
+    alongside it, so it never gets counted or gets a row of its own here
+    (mirrors 'clean'/'remove', which always skip it too); its branch name
+    is folded into the heading instead, so a `master`/`trunk`/whatever a
+    repo's default branch happens to be named is still visible at a glance,
+    without implying it's a worktree like the others.
+
+    When there's nothing else checked out, this prints a single dim summary
+    line for the main worktree instead of a whole table, that's a header, a
+    header-divider, and a row repeated for every such repo otherwise, and
+    it's the common case: it lets the repos that actually have extra
+    worktrees stand out.
     """
     if not worktrees:
         return 0, 0
@@ -376,22 +388,27 @@ def _render_repo_worktrees(
     main_entry = next((w for w in worktrees if w.get("is_main")), None)
     path = Path(main_entry["path"]) if main_entry and main_entry.get("path") else None
     title = _repo_header(repo_root, path)
+    if main_entry is not None and (main_branch := main_entry.get("branch")):
+        title += f" [dim](main: {main_branch})[/]"
+
+    others = [w for w in worktrees if not w.get("is_main")]
 
     console.print()
-    if len(worktrees) == 1 and main_entry is not None:
+    if not others:
+        if main_entry is None:
+            console.print(title)
+            return 0, 0
         size_kb = _worktree_size_kb(main_entry, size_cache) if show_size else None
-        bits = [main_entry.get("branch") or "?"]
-        if size_kb:
-            bits.append(sizes.human_kb(size_kb))
+        bits = [sizes.human_kb(size_kb)] if size_kb else []
         bits.append("[yellow]dirty[/]" if _is_dirty(main_entry) else "clean")
         sep = "  \u00b7  "
-        console.print(f"{title} [dim]{sep.join(bits)}[/]")
-        return 1, size_kb or 0
+        console.print(f"{title} [dim]no other worktrees \u00b7 {sep.join(bits)}[/]")
+        return 0, size_kb or 0
 
-    table, total_kb = _worktrees_table(worktrees, show_size=show_size, size_cache=size_cache)
+    table, total_kb = _worktrees_table(others, show_size=show_size, size_cache=size_cache)
     console.print(title)
     console.print(table)
-    return len(worktrees), total_kb
+    return len(others), total_kb
 
 
 @app.command("list", rich_help_panel="Worktrees")
@@ -905,7 +922,7 @@ def cmd_status(
 
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Repo", no_wrap=True)
-    table.add_column("Worktrees", justify="right")
+    table.add_column("Extra worktrees", justify="right")
     if show_size:
         table.add_column("Size", justify="right")
     table.add_column("Status")
@@ -958,8 +975,9 @@ def cmd_status(
                 continue
 
             worktrees = worktrees_by_repo.get(repo_root, [])
-            total += len(worktrees)
-            row = [_short_path(repo_root), str(len(worktrees))]
+            extra_count = sum(1 for w in worktrees if not w.get("is_main"))
+            total += extra_count
+            row = [_short_path(repo_root), str(extra_count)]
             if show_size:
                 size_kb = sum(s for w in worktrees if (s := _worktree_size_kb(w, size_cache)) is not None)
                 total_kb += size_kb

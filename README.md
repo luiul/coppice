@@ -160,6 +160,13 @@ reference.
   is its directory, not its branch: git refuses to check out the same
   branch in two worktrees at once, so switching between worktrees is just
   changing directories, no stashing required.
+- **Main worktree**: the original checkout, the one that actually holds
+  `.git`, as opposed to a **linked** worktree's pointer file (see [One
+  `.git`, many working directories](#one-git-many-working-directories)).
+  It's the repo itself, not something `coppice` creates or manages
+  alongside it, so `cop list`/`status` never count or list it as "a
+  worktree"; its branch name shows up folded into the repo heading
+  instead (e.g. `(main: master)`), and `remove`/`clean` always skip it.
 - **Current worktree**: whichever one you happen to be standing in when
   you run a command, shown as `[current]` in `cop list`.
 - **Registry**: the shared list of repos `coppice`/`wt` have seen before
@@ -244,7 +251,7 @@ that branch's **worktree**, not the branch itself:
 | Command | Takes | Does |
 |---|---|---|
 | `cop new PATH [--branch B] [--base REF]` | a repo **path** | creates branch `B` if it doesn't exist yet (from `REF`, default: `wt`'s default branch), plus a worktree checked out onto it |
-| `cop list [PATH]` | nothing, or a repo path | lists worktrees, one per checked-out branch, **not** every branch in the repo |
+| `cop list [PATH]` | nothing, or a repo path | lists worktrees, one per checked-out branch, **not** every branch in the repo, and **not** the main worktree (see [Concepts](#concepts)) |
 | `cop remove BRANCH...` | one or more branch **names** | deletes each branch's worktree directory; the branch itself survives unless it's merged or `-D`/`--force-delete` is passed |
 | `cop clean` | filters (age or `--merged`) | the bulk version of `remove`: same branch-vs-worktree distinction applies |
 
