@@ -122,9 +122,10 @@ home directory.
 
 ## Concepts
 
-- **Repo**: a git repository, identified by its root directory (where
-  `.git` lives). `coppice` works across as many repos as you have on disk,
-  not just the one you're standing in.
+- **Repo**: a git repository, identified by its root directory, inside
+  which `.git` lives: the database of every commit and branch.
+  `coppice` works across as many repos as you have on disk, not just the
+  one you're standing in.
 - **Commit**: a snapshot of the repo's files at a point in time, plus a
   pointer to its parent commit(s). Every worktree of a repo shares the same
   history of commits; making a commit in one worktree makes it visible to
@@ -135,16 +136,16 @@ home directory.
   and switching (`git switch`/`git checkout`) requires committing or
   stashing first.
 - **Worktree**: a separate directory on disk checked out to one branch,
-  linked to the same `.git` history as every other worktree of that repo
-  (see [One `.git`, many working directories](#one-git-many-working-directories)
-  below). A worktree's identity is its directory, not its branch, the
-  branch is just what it's checked out to; git refuses to check out the
-  same branch in two worktrees at once. Instead of a single directory
-  that changes branches over time, each worktree stays checked out to its
-  own branch, so switching between them is just changing directories, no
-  stashing required. A repo's original checkout, where `.git` itself
-  lives, is its **main worktree**; every additional one is a **linked
-  worktree**.
+  reading from the same `.git` database as every other worktree of that
+  repo (see [One `.git`, many working directories](#one-git-many-working-directories)
+  below). Only the repo's original directory, its **main worktree**,
+  actually contains `.git`; every additional (**linked**) worktree just
+  holds a small `.git` file pointing back to it. A worktree's identity is
+  its directory, not its branch, the branch is just what it's checked out
+  to; git refuses to check out the same branch in two worktrees at once.
+  Instead of a single directory that changes branches over time, each
+  worktree stays checked out to its own branch, so switching between them
+  is just changing directories, no stashing required.
 - **Current worktree**: whichever one you happen to be standing in when
   you run a command, shown as `[current]` in `cop list`.
 - **Registry**: the shared list of repos `coppice`/`wt` have seen before
@@ -158,46 +159,62 @@ home directory.
 
 ### One `.git`, many working directories
 
-`.git` is the repo's actual database: every commit, branch, and the full
-history that ties them together. A normal checkout has exactly one
-working directory reading from it, so switching branches means mutating
-that one directory in place, stash or commit, then `git switch`, over
-and over. Worktrees add more working directories pointed at that *same*
-`.git`, each one checked out to a different branch at the same time, so
-switching is just `cd`, and a commit made in one is immediately visible
-from the others:
+`.git` is a **directory that's a database**: every commit, branch, and
+the full history that ties them together, stored as git's own object
+format, not plain files you'd edit directly. It lives *inside* your
+working directory, e.g. `~/dbt-models/.git`, sitting alongside the files
+you actually edit, not somewhere separate.
+
+A normal checkout has exactly one working directory, with that one
+`.git` database inside it, so switching branches means mutating that
+same directory in place, stash or commit, then `git switch`, over and
+over. A worktree adds another working directory elsewhere on disk, but
+it doesn't get its own copy of `.git`; only the original directory (the
+**main worktree**) holds the real `.git` database. Every other
+(**linked**) worktree just contains a `.git` *file*, a few bytes of text
+pointing back at the main one, so all of them read and write the same
+history:
 
 ```mermaid
 flowchart LR
     subgraph classic["Without worktrees — one directory, one branch at a time"]
         direction TB
-        gitC[(".git — commit history")]
-        dirC["~/dbt-models<br/>(single working directory)"]
+        subgraph dirC["~/dbt-models (working directory)"]
+            gitC[(".git/<br/>commit database")]
+        end
         onA["checked out: branch A"]
         stash["git switch B<br/>(stash/commit first)"]
         onB["checked out: branch B"]
-        gitC --> dirC --> onA --> stash --> onB
+        dirC --> onA --> stash --> onB
     end
 
     subgraph worktrees["With worktrees — one .git, many directories"]
         direction TB
-        gitW[(".git — commit history")]
-        mainWt["~/dbt-models<br/>(main worktree) · branch A"]
-        wtB["~/dbt-models/.worktrees/B<br/>(linked worktree) · branch B"]
-        wtC["~/dbt-models/.worktrees/C<br/>(linked worktree) · branch C"]
-        gitW --> mainWt
-        gitW --> wtB
-        gitW --> wtC
+        subgraph mainWt["~/dbt-models (main worktree) · branch A"]
+            gitW[(".git/<br/>commit database")]
+        end
+        subgraph wtB["~/dbt-models/.worktrees/B (linked worktree) · branch B"]
+            ptrB[".git file<br/>(pointer, not a copy)"]
+        end
+        subgraph wtC["~/dbt-models/.worktrees/C (linked worktree) · branch C"]
+            ptrC[".git file<br/>(pointer, not a copy)"]
+        end
+        gitW -. shared history .-> ptrB
+        gitW -. shared history .-> ptrC
     end
 
     classDef gitNode fill:#f5f3ff,stroke:#8b5cf6,stroke-width:2px,color:#4c1d95;
-    classDef dirNode fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
     classDef stateNode fill:#eef2ff,stroke:#6366f1,stroke-width:2px,color:#312e81;
     classDef actionNode fill:#fff7ed,stroke:#f97316,stroke-width:2px,color:#7c2d12;
+    classDef ptrNode fill:#ecfdf5,stroke:#10b981,stroke-width:2px,color:#065f46;
     class gitC,gitW gitNode;
-    class dirC dirNode;
-    class onA,onB,mainWt,wtB,wtC stateNode;
+    class onA,onB stateNode;
     class stash actionNode;
+    class ptrB,ptrC ptrNode;
+    style dirC fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
+    style mainWt fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
+    style wtB fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
+    style wtC fill:#f8fafc,stroke:#94a3b8,stroke-width:2px,color:#0f172a;
 ```
 
 A worktree's identity is its directory, not its branch name; the branch
