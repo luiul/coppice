@@ -132,7 +132,7 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     console.print(table)
 
 
-@app.command("new", rich_help_panel="Worktrees")
+@app.command("new", rich_help_panel="Create")
 def cmd_new(
     path: Annotated[str, typer.Argument(help="Repo to create/reuse a worktree in.")] = ".",
     branch: Annotated[
@@ -411,7 +411,7 @@ def _render_repo_worktrees(
     return len(others), total_kb
 
 
-@app.command("list", rich_help_panel="Worktrees")
+@app.command("list", rich_help_panel="Inspect")
 def cmd_list(
     path: Annotated[
         str | None,
@@ -538,7 +538,7 @@ def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[d
     return [candidates[i][1]["branch"] for i in picked]
 
 
-@app.command("remove", rich_help_panel="Worktrees")
+@app.command("remove", rich_help_panel="Remove (destructive)")
 def cmd_remove(
     branches: Annotated[
         list[str] | None,
@@ -664,7 +664,7 @@ def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
     return label
 
 
-@app.command("clean", rich_help_panel="Worktrees")
+@app.command("clean", rich_help_panel="Remove (destructive)")
 def cmd_clean(
     days: Annotated[int, typer.Argument(help="Remove worktrees older than this many days.")] = 14,
     repo_path: Annotated[
@@ -913,7 +913,7 @@ def cmd_clean(
         raise typer.Exit(1)
 
 
-@app.command("status", rich_help_panel="Setup & diagnostics")
+@app.command("status", rich_help_panel="Inspect")
 def cmd_status(
     show_size: Annotated[
         bool,
@@ -1032,7 +1032,7 @@ def cmd_status(
 
 
 shell_app = typer.Typer(help="cd integration for 'new' (see 'coppice shell init --help'). Works for 'cop' too.")
-app.add_typer(shell_app, name="shell", rich_help_panel="Setup & diagnostics")
+app.add_typer(shell_app, name="shell", rich_help_panel="Setup")
 
 
 @shell_app.command("init")
