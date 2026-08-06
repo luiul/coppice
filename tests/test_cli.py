@@ -229,6 +229,45 @@ def test_remove_partial_failure_reports_both_counts(tmp_path, monkeypatch):
     assert "missing-branch" in result.output
 
 
+def test_remove_without_yes_prompts_and_cancels_on_no(tmp_path, monkeypatch):
+    """Without --yes, `remove` must ask for confirmation itself rather than
+    relying on `wt remove`'s own prompt: `wt.run` captures stdout/stderr, so
+    `wt` treats the call as non-interactive and never actually prompts,
+    which would otherwise remove worktrees with no confirmation at all.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    remove_calls: list[Any] = []
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: remove_calls.append((a, k)))
+
+    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
+
+    assert result.exit_code != 0
+    assert "Remove the worktree(s) above?" in result.output
+    assert "Cancelled." in result.output
+    assert remove_calls == []
+
+
+def test_remove_without_yes_prompts_and_proceeds_on_yes(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    remove_calls: list[Any] = []
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: remove_calls.append((a, k)))
+
+    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="y\n")
+
+    assert result.exit_code == 0, result.output
+    assert "Removed 1 worktree(s)." in result.output
+    assert len(remove_calls) == 1
+    # Confirmed once at the coppice level, so `wt remove` is always told
+    # `-y` too rather than relying on its own (non-functional, here) prompt.
+    assert remove_calls[0][1]["yes"] is True
+
+
 def test_remove_no_branch_falls_back_without_fzf(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch, which={"fzf": None})

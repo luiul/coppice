@@ -552,7 +552,7 @@ def cmd_remove(
             help="Scope to this repo. Defaults to the registry plus the repo you're standing in.",
         ),
     ] = None,
-    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip wt's own confirmation prompt.")] = False,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the confirmation prompt.")] = False,
     force: Annotated[bool, typer.Option("--force", "-f", help="Remove even with uncommitted changes.")] = False,
     force_delete: Annotated[
         bool, typer.Option("--force-delete", "-D", help="Also delete the branch if unmerged.")
@@ -563,6 +563,13 @@ def cmd_remove(
     PATH is `--repo/-C` here (not a bare positional like `new`/`list`), since
     a bare positional would be ambiguous with the BRANCH list. Omit BRANCH
     entirely for an fzf multi-select picker scoped the same way.
+
+    Asks for confirmation before removing anything, unless --yes/-y is
+    passed. This prompt is coppice's own, not `wt remove`'s: `wt` is run
+    with its stdout/stderr captured, so it treats the call as
+    non-interactive and skips its own approval prompt, `-y` and all,
+    instead of blocking on it. Relying on `wt` to ask would silently remove
+    worktrees with no confirmation at all.
     """
     try:
         scope = repo.scope_repos(repo_path)
@@ -597,7 +604,7 @@ def cmd_remove(
             raise typer.Exit(1)
 
     failures: list[str] = []
-    n_removed = 0
+    targets: list[tuple[Path, str]] = []
     for branch_name in branches:
         matches = [r for r in scope if any(w["branch"] == branch_name for w in removable[r])]
         if not matches:
@@ -611,10 +618,27 @@ def cmd_remove(
             failures.append(branch_name)
             continue
 
-        target = matches[0]
+        targets.append((matches[0], branch_name))
+
+    if not targets:
+        err.print(f"[red]Removed 0 worktree(s), {len(failures)} failed:[/]")
+        for f in failures:
+            err.print(f"  - {f}")
+        raise typer.Exit(1)
+
+    console.print(f"About to remove {len(targets)} worktree(s):")
+    for target, branch_name in targets:
+        console.print(f"  {branch_name} @ {target.name}")
+
+    if not yes and not typer.confirm("Remove the worktree(s) above?", default=False):
+        console.print("Cancelled.")
+        raise typer.Exit(1)
+
+    n_removed = 0
+    for target, branch_name in targets:
         console.print(f"Removing '{branch_name}' @ {target.name}...")
         try:
-            wt.remove(target, branch_name, yes=yes, force=force, force_delete=force_delete)
+            wt.remove(target, branch_name, yes=True, force=force, force_delete=force_delete)
         except (wt.WtNotFoundError, wt.WtCommandError) as exc:
             err.print(f"[red]Error:[/] {exc}")
             failures.append(branch_name)
