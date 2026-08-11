@@ -16,7 +16,12 @@ import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 
-_GITHUB_REMOTE_RE = re.compile(r"github\.com[:/](?P<slug>[^/]+/[^/.]+?)(?:\.git)?$")
+# The repo-name group deliberately allows dots: `[^/.]+?` (excluding dots)
+# used to be the pattern, which silently failed to match any GitHub repo
+# whose name contains a literal dot (e.g. `owner/my.project`). The
+# non-greedy `[^/]+?` here still backtracks correctly to strip an optional
+# trailing `.git` suffix, since that's anchored by `(?:\.git)?$`.
+_GITHUB_REMOTE_RE = re.compile(r"github\.com[:/](?P<slug>[^/]+/[^/]+?)(?:\.git)?$")
 
 
 def repo_slug(repo: Path) -> str | None:

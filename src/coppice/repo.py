@@ -10,7 +10,10 @@ self-heal below) has touched.
 
 from __future__ import annotations
 
+import fcntl
+import os
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 
 REGISTRY_PATH = Path.home() / ".cache" / "wt" / "known-repos"
@@ -26,6 +29,12 @@ def resolve_repo_root(path: str | Path = ".") -> Path:
     Uses git-common-dir (not --show-toplevel) so this also works when PATH
     is inside a linked worktree, not just the main checkout: git-common-dir
     always resolves to the *main* repo's .git, wherever it's invoked from.
+
+    For a *bare* repo, `git-common-dir` already points at the repo root
+    itself, not at a `.git` subdirectory inside it, even when resolved from
+    a linked worktree of that bare repo. Taking `.parent` unconditionally
+    would silently walk up to the bare repo's parent directory instead, an
+    unrelated non-git path. So only take `.parent` when the repo isn't bare.
     """
     target = Path(path).expanduser()
     proc = subprocess.run(
@@ -35,7 +44,21 @@ def resolve_repo_root(path: str | Path = ".") -> Path:
     )
     if proc.returncode != 0:
         raise RepoResolutionError(f"not a git repository: {target}")
-    return Path(proc.stdout.strip()).parent
+    common_dir = Path(proc.stdout.strip())
+
+    # Check bareness of common_dir itself, not of target: from a linked
+    # worktree of a bare repo, `--is-bare-repository` run against the
+    # worktree reports false (the worktree checkout isn't bare), even though
+    # git-common-dir already points at the bare repo's own root. Querying
+    # common_dir directly gets the right answer in both the main-checkout
+    # and linked-worktree cases.
+    bare_proc = subprocess.run(
+        ["git", "-C", str(common_dir), "rev-parse", "--is-bare-repository"],
+        capture_output=True,
+        text=True,
+    )
+    is_bare = bare_proc.returncode == 0 and bare_proc.stdout.strip() == "true"
+    return common_dir if is_bare else common_dir.parent
 
 
 def known_repos() -> list[Path]:
@@ -43,6 +66,29 @@ def known_repos() -> list[Path]:
     if not REGISTRY_PATH.exists():
         return []
     return [Path(line) for line in REGISTRY_PATH.read_text().splitlines() if line.strip()]
+
+
+@contextmanager
+def _locked_registry():
+    """Hold an exclusive lock across a read-modify-write of the registry.
+
+    `register_repo`/`prune_missing_repos` are both a plain read-JSON-then-
+    overwrite with no locking otherwise: two concurrent writers (two `cop
+    new` invocations, or a `wt` post-start `registry` hook firing mid-write)
+    can both read the same stale contents, and whichever writes last
+    silently clobbers the other's addition/removal. A sidecar `.lock` file
+    (rather than locking REGISTRY_PATH itself) keeps plain readers like
+    `known_repos` lock-free.
+    """
+    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = REGISTRY_PATH.with_name(REGISTRY_PATH.name + ".lock")
+    fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o644)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
 
 
 def register_repo(repo: Path) -> None:
@@ -53,10 +99,10 @@ def register_repo(repo: Path) -> None:
     `coppice list`/`coppice remove` can still find the repo later regardless
     of hook config.
     """
-    REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
-    repos = {str(r) for r in known_repos()}
-    repos.add(str(repo))
-    REGISTRY_PATH.write_text("\n".join(sorted(repos)) + "\n")
+    with _locked_registry():
+        repos = {str(r) for r in known_repos()}
+        repos.add(str(repo))
+        REGISTRY_PATH.write_text("\n".join(sorted(repos)) + "\n")
 
 
 def prune_missing_repos() -> list[Path]:
@@ -73,14 +119,15 @@ def prune_missing_repos() -> list[Path]:
     Called on every scope resolution so the registry self-heals on its own
     over time instead of accumulating dead entries.
     """
-    repos = known_repos()
-    missing = [r for r in repos if not r.exists()]
-    if missing:
-        remaining = {str(r) for r in repos if r.exists()}
-        if remaining:
-            REGISTRY_PATH.write_text("\n".join(sorted(remaining)) + "\n")
-        else:
-            REGISTRY_PATH.unlink(missing_ok=True)
+    with _locked_registry():
+        repos = known_repos()
+        missing = [r for r in repos if not r.exists()]
+        if missing:
+            remaining = {str(r) for r in repos if r.exists()}
+            if remaining:
+                REGISTRY_PATH.write_text("\n".join(sorted(remaining)) + "\n")
+            else:
+                REGISTRY_PATH.unlink(missing_ok=True)
     return missing
 
 
