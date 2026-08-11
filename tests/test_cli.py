@@ -82,11 +82,18 @@ def test_new_without_wt_fails_clearly(tmp_path, monkeypatch):
 
 
 def _stub_switch(monkeypatch, *, branch_exists: bool, remote_branch_exists: bool = False):
-    """Stub out the two `wt` calls `cmd_new` makes after the branch-exists
-    check, so its confirmation-prompt logic can be tested without a real
-    `wt` install or worktree creation.
+    """Stub out every `wt` call `cmd_new` makes: the `_print_existing_worktrees`
+    preview it prints before ever prompting, the branch-exists checks, and
+    the switch/create call, so its confirmation-prompt logic can be tested
+    without a real `wt` install or worktree creation. Without stubbing
+    `list_worktrees` too, `_stub_wt`'s faked `shutil.which` is enough to get
+    past `require_wt()`, but `cmd_new` still shells out to a literal `wt`
+    subprocess right after, which raises `FileNotFoundError` wherever `wt`
+    genuinely isn't on PATH (e.g. CI), even though it happens to be a no-op
+    on a machine that has `wt` installed for real.
     """
     switch_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [])
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: branch_exists)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: remote_branch_exists)
     monkeypatch.setattr(
