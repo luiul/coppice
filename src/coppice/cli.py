@@ -143,8 +143,20 @@ def cmd_new(
         str | None,
         typer.Option("--base", "-B", help="Base branch/ref to create from. Defaults to wt's own default branch."),
     ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip the confirmation prompt when the branch already exists."),
+    ] = False,
 ) -> None:
     """Create or reuse a worktree for the repo at PATH.
+
+    When the branch (named via --branch, or the prompted-for description)
+    already exists, locally or on the remote, asks before switching to its
+    worktree instead (skip with --yes/-y): 'new' implies a fresh branch, so
+    an existing one, most likely a typo'd --branch meant to name a new
+    one, is the surprising case worth a check, and defaults to no on a
+    bare Enter accordingly. No prompt when it doesn't exist yet anywhere,
+    creating it is exactly what 'new' is for.
 
     Examples:
         coppice new ./tardis
@@ -176,7 +188,15 @@ def cmd_new(
 
     console.print(f"Worktree branch: [bold]{branch}[/]")
 
-    create = not wt.branch_exists(repo_root, branch)
+    create = not (wt.branch_exists(repo_root, branch) or wt.remote_branch_exists(repo_root, branch))
+    if (
+        not create
+        and not yes
+        and not typer.confirm(f"Branch '{branch}' already exists. Switch to its worktree instead?", default=False)
+    ):
+        console.print("Cancelled.")
+        raise typer.Exit(1)
+
     try:
         result = wt.switch(repo_root, branch, create=create, base=base)
     except (wt.WtNotFoundError, wt.WtCommandError) as exc:

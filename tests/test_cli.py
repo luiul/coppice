@@ -81,6 +81,101 @@ def test_new_without_wt_fails_clearly(tmp_path, monkeypatch):
     assert "Traceback" not in result.output
 
 
+def _stub_switch(monkeypatch, *, branch_exists: bool, remote_branch_exists: bool = False):
+    """Stub out the two `wt` calls `cmd_new` makes after the branch-exists
+    check, so its confirmation-prompt logic can be tested without a real
+    `wt` install or worktree creation.
+    """
+    switch_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: branch_exists)
+    monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: remote_branch_exists)
+    monkeypatch.setattr(
+        wt,
+        "switch",
+        lambda repo, branch, **kwargs: (
+            switch_calls.append({"repo": repo, "branch": branch, **kwargs}) or {"action": "created", "path": None}
+        ),
+    )
+    return switch_calls
+
+
+def test_new_prompts_before_switching_to_an_existing_branch(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=True)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "existing-branch"], input="n\n")
+
+    assert result.exit_code != 0
+    assert "already exists" in result.output
+    assert "Cancelled" in result.output
+    assert switch_calls == []
+
+
+def test_new_bare_enter_declines_the_prompt(tmp_path, monkeypatch):
+    """The prompt defaults to no on a bare Enter: 'new' implies a fresh
+    branch, so hitting an existing one is the surprising case, not one to
+    wave through by default.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=True)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "existing-branch"], input="\n")
+
+    assert result.exit_code != 0
+    assert "Cancelled" in result.output
+    assert switch_calls == []
+
+
+def test_new_prompts_for_a_remote_only_branch_too(tmp_path, monkeypatch):
+    """A branch that only exists on the remote (pushed by someone else,
+    never checked out locally) must not be treated as absent: that would
+    silently fork a new local branch from --base instead of picking up
+    the remote one, diverging under the same name.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False, remote_branch_exists=True)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "remote-only-branch", "--yes"])
+
+    assert result.exit_code == 0
+    assert len(switch_calls) == 1
+    assert switch_calls[0]["create"] is False
+
+
+def test_new_yes_skips_the_confirmation_prompt(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=True)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "existing-branch", "--yes"])
+
+    assert result.exit_code == 0
+    assert "already exists" not in result.output
+    assert len(switch_calls) == 1
+    assert switch_calls[0]["create"] is False
+
+
+def test_new_creating_a_fresh_branch_never_prompts(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0
+    assert "already exists" not in result.output
+    assert len(switch_calls) == 1
+    assert switch_calls[0]["create"] is True
+
+
 def test_list_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)

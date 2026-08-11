@@ -95,6 +95,34 @@ def branch_exists(repo: Path, branch: str) -> bool:
     return proc.returncode == 0
 
 
+def remote_branch_exists(repo: Path, branch: str) -> bool:
+    """Whether BRANCH exists as a remote-tracking ref (e.g. origin/BRANCH)
+    for any configured remote, even though it has no local branch yet.
+
+    `branch_exists` alone misses this: a branch pushed by someone else but
+    never checked out locally reads as "doesn't exist" from local refs, so
+    callers deciding whether to pass `--create` (and fork a fresh branch
+    from --base) would silently diverge from the remote branch of the same
+    name instead of picking it up, the same fork `wt switch` (without
+    --create) already knows how to avoid: "Switching to a remote branch
+    ... creates a local tracking branch."
+
+    Checks local remote-tracking refs only (no network calls); relies on
+    those refs being reasonably fresh, same assumption `branch_exists`
+    makes about local branches.
+    """
+    remotes = subprocess.run(
+        ["git", "-C", str(repo), "remote"], capture_output=True, text=True, check=False
+    ).stdout.split()
+    return any(
+        subprocess.run(
+            ["git", "-C", str(repo), "show-ref", "--verify", "--quiet", f"refs/remotes/{remote}/{branch}"]
+        ).returncode
+        == 0
+        for remote in remotes
+    )
+
+
 def switch(
     repo: Path,
     branch: str,
