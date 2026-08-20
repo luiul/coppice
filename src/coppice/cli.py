@@ -218,14 +218,6 @@ def cmd_new(
     result_path = result.get("path")
     base_branch = result.get("base_branch")
 
-    # post-start hooks (VS Code, venv, copy-ignored, herdr registration) only
-    # fire on creation, per wt's own docs, reusing an existing worktree skips
-    # them entirely. Re-run just the herdr one here so a worktree that
-    # predates the hook, or is reused from a fresh terminal, still shows up
-    # in herdr's TUI instead of silently never getting registered.
-    if not created and result_path:
-        wt.run_post_start_hook(Path(result_path), "herdr")
-
     # Echo back what it was actually forked from whenever we created one
     # (i.e. `base_branch` is present at all): silently trusting that a new
     # branch forked from the right place is exactly the assumption that
