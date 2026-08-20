@@ -183,6 +183,87 @@ def test_new_creating_a_fresh_branch_never_prompts(tmp_path, monkeypatch):
     assert switch_calls[0]["create"] is True
 
 
+def test_new_resolves_the_actual_default_branch_as_base_when_creating(tmp_path, monkeypatch):
+    """Without an explicit `--base`, `cmd_new` must resolve the repo's
+    *actual* default branch itself (repo.default_branch) rather than
+    leaving the base unset and trusting `wt`'s own (cacheable, and so
+    potentially stale) default-branch detection.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+    monkeypatch.setattr(repo, "default_branch", lambda _repo: "master")
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0, result.output
+    assert switch_calls[0]["base"] == "master"
+
+
+def test_new_explicit_base_wins_over_the_resolved_default_branch(tmp_path, monkeypatch):
+    """An explicit `--base` must be passed through as-is, never overridden
+    by the freshly resolved default branch.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+    monkeypatch.setattr(repo, "default_branch", lambda _repo: "master")
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--base", "develop"])
+
+    assert result.exit_code == 0, result.output
+    assert switch_calls[0]["base"] == "develop"
+
+
+def test_new_skips_default_branch_resolution_when_reusing(tmp_path, monkeypatch):
+    """`--base` is meaningless (and `wt` warns + ignores it) when switching
+    to a branch that already exists, so `cmd_new` shouldn't even bother
+    resolving one in that case.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=True)
+    resolved: list[Path] = []
+    monkeypatch.setattr(repo, "default_branch", lambda repo_root: resolved.append(repo_root) or "master")
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "existing-branch", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert resolved == []
+    assert switch_calls[0]["base"] is None
+
+
+def test_new_reports_the_resolved_base_branch_it_forked_from(tmp_path, monkeypatch):
+    """`wt switch --create`'s JSON reply carries `base_branch`; surface it
+    in the confirmation message so what a new worktree actually forked
+    from is visible at a glance, not something you have to dig into `git
+    log` to double-check.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [])
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: False)
+    monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
+    monkeypatch.setattr(
+        wt,
+        "switch",
+        lambda repo, branch, **kwargs: {
+            "action": "created",
+            "path": str(tmp_path / "new-worktree"),
+            "base_branch": "master",
+        },
+    )
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0, result.output
+    assert "from master" in result.output
+
+
 def test_new_reusing_a_worktree_reruns_the_herdr_post_start_hook(tmp_path, monkeypatch):
     """`wt switch` without `--create` (the reuse path) skips post-start
     hooks entirely, they only fire at creation time, so a worktree reused

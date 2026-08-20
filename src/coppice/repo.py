@@ -61,6 +61,57 @@ def resolve_repo_root(path: str | Path = ".") -> Path:
     return common_dir if is_bare else common_dir.parent
 
 
+def default_branch(repo: Path, *, timeout: float = 5.0) -> str | None:
+    """REPO's actual default branch (e.g. 'master' or 'main'), matching
+    whatever its remote (GitHub, GitLab, ...) is configured with right now,
+    not whatever happens to be checked out in the main worktree, or in
+    whichever worktree/branch a command happens to be run from.
+
+    Why not just let `wt switch --create` figure this out itself (it does,
+    without a `--base`)? It caches the result in git config
+    (`worktrunk.default-branch`), and that cache can go stale: an org
+    renaming a remote's default branch (`master` -> `main`, say) leaves
+    every clone's cache pointing at the old name until something explicitly
+    re-detects it (worktrunk#3478/#3603). Resolving it fresh here every
+    time, and passing the result to `wt switch --create --base <this>`,
+    makes `coppice new` immune to that staleness: every worktree it creates
+    forks from whatever the remote's default branch actually is right now.
+
+    Tries the fast local read first (`origin/HEAD`, populated by `git
+    clone`/`git remote set-head origin -a`), falling back to a live `git
+    ls-remote --symref origin HEAD` (bounded to TIMEOUT seconds, an actual
+    network round-trip) when that's unset, e.g. a clone made before the
+    remote's default branch existed, or one that predates a later rename.
+    Returns None when neither works (no 'origin' remote, or genuinely
+    unreachable with no local cache to fall back on), leaving the caller
+    free to omit `--base` and let `wt`'s own (still correct on a fresh
+    clone, just not stale-cache-proof) resolution take over instead.
+    """
+    local = subprocess.run(
+        ["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if local.returncode == 0 and (ref := local.stdout.strip()):
+        return ref.removeprefix("origin/")
+
+    try:
+        remote = subprocess.run(
+            ["git", "-C", str(repo), "ls-remote", "--symref", "origin", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    if remote.returncode != 0:
+        return None
+    for line in remote.stdout.splitlines():
+        if line.startswith("ref:") and line.endswith("\tHEAD"):
+            return line.split()[1].removeprefix("refs/heads/")
+    return None
+
+
 def known_repos() -> list[Path]:
     """Repos registered in the shared `wt`/`coppice` registry file."""
     if not REGISTRY_PATH.exists():

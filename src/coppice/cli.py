@@ -141,7 +141,7 @@ def cmd_new(
     ] = None,
     base: Annotated[
         str | None,
-        typer.Option("--base", "-B", help="Base branch/ref to create from. Defaults to wt's own default branch."),
+        typer.Option("--base", "-B", help="Base branch/ref to create from. Defaults to the repo's actual default branch (freshly resolved from its remote)."),
     ] = None,
     yes: Annotated[
         bool,
@@ -197,6 +197,15 @@ def cmd_new(
         console.print("Cancelled.")
         raise typer.Exit(1)
 
+    # Resolve the actual base ourselves rather than leaving it to `wt`'s own
+    # (cached, and so potentially stale, see repo.default_branch) default-
+    # branch detection, but only when the caller didn't already pick one
+    # via --base, and only when we're actually forking a new branch, `base`
+    # is meaningless (and wt warns + ignores it) when switching to one that
+    # already exists.
+    if create and base is None:
+        base = repo.default_branch(repo_root)
+
     try:
         result = wt.switch(repo_root, branch, create=create, base=base)
     except (wt.WtNotFoundError, wt.WtCommandError) as exc:
@@ -207,6 +216,7 @@ def cmd_new(
     created = result.get("action") == "created"
     verb = "Created" if created else "Reused"
     result_path = result.get("path")
+    base_branch = result.get("base_branch")
 
     # post-start hooks (VS Code, venv, copy-ignored, herdr registration) only
     # fire on creation, per wt's own docs, reusing an existing worktree skips
@@ -216,10 +226,20 @@ def cmd_new(
     if not created and result_path:
         wt.run_post_start_hook(Path(result_path), "herdr")
 
+    # Echo back what it was actually forked from whenever we created one
+    # (i.e. `base_branch` is present at all): silently trusting that a new
+    # branch forked from the right place is exactly the assumption that
+    # broke when `wt`'s cached default-branch detection went stale, this
+    # makes the actual base visible at a glance instead of requiring a dig
+    # through `git log` after the fact to notice it forked from the wrong
+    # place.
+    from_suffix = f" from [bold]{base_branch}[/]" if base_branch else ""
     if result_path:
-        console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{_short_path(Path(result_path))}[/]")
+        console.print(
+            f"{verb} worktree for [bold]{branch}[/]{from_suffix} @ [green]{_short_path(Path(result_path))}[/]"
+        )
     else:
-        console.print(f"{verb} worktree for [bold]{branch}[/]")
+        console.print(f"{verb} worktree for [bold]{branch}[/]{from_suffix}")
 
     if result_path:
         shell.write_cd_file(Path(result_path))

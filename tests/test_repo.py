@@ -62,6 +62,57 @@ def test_resolve_repo_root_from_bare_repo_linked_worktree(tmp_path):
     assert repo.resolve_repo_root(worktree) == bare
 
 
+def test_default_branch_none_without_an_origin_remote(tmp_path):
+    """No 'origin' at all (e.g. a from-scratch local repo): neither the
+    local `origin/HEAD` read nor the `ls-remote` fallback has anything to
+    go on, so this must return None quickly rather than hang or raise, and
+    the caller (`cmd_new`) falls back to letting `wt` pick its own default.
+    """
+    solo = _init_repo(tmp_path / "solo")
+    assert repo.default_branch(solo) is None
+
+
+def test_default_branch_reads_local_origin_head_when_set(tmp_path):
+    """The common, fast case: `origin/HEAD` is already cached locally
+    (`git clone`/`git remote set-head origin -a` populates it), so this
+    should read it straight off disk rather than making a network call.
+    """
+    bare = _init_bare_repo(tmp_path / "bare.git")
+    subprocess.run(["git", "-C", str(bare), "symbolic-ref", "HEAD", "refs/heads/master"], check=True)
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(bare), str(clone)], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(clone), "commit", "--allow-empty", "-q", "-m", "init"], check=True)
+    subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "HEAD:master"], check=True)
+    subprocess.run(["git", "-C", str(clone), "remote", "set-head", "origin", "-a"], check=True)
+
+    assert repo.default_branch(clone) == "master"
+
+
+def test_default_branch_falls_back_to_a_live_remote_read(tmp_path):
+    """When the local `origin/HEAD` cache is missing (clone predates the
+    remote branch existing, or a later rename never got re-synced locally,
+    the exact staleness worktrunk#3478 describes), this must still resolve
+    correctly via a live `git ls-remote --symref` instead of returning
+    None, and the answer must reflect the remote's *current* default
+    branch even though the clone checked out something else entirely.
+    """
+    bare = _init_bare_repo(tmp_path / "bare.git")
+    subprocess.run(["git", "-C", str(bare), "symbolic-ref", "HEAD", "refs/heads/master"], check=True)
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(bare), str(clone)], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(clone), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(clone), "commit", "--allow-empty", "-q", "-m", "init"], check=True)
+    subprocess.run(["git", "-C", str(clone), "push", "-q", "origin", "HEAD:master"], check=True)
+    # Deliberately no `git remote set-head`, so no local `origin/HEAD` cache
+    # exists (that's the point of this test).
+    subprocess.run(["git", "-C", str(clone), "checkout", "-q", "-b", "some-other-branch"], check=True)
+
+    assert repo.default_branch(clone) == "master"
+
+
 def test_registry_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
 
