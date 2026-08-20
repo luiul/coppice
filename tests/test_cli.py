@@ -183,6 +183,48 @@ def test_new_creating_a_fresh_branch_never_prompts(tmp_path, monkeypatch):
     assert switch_calls[0]["create"] is True
 
 
+def test_new_reusing_a_worktree_reruns_the_herdr_post_start_hook(tmp_path, monkeypatch):
+    """`wt switch` without `--create` (the reuse path) skips post-start
+    hooks entirely, they only fire at creation time, so a worktree reused
+    from a fresh terminal would otherwise never get (re-)registered with
+    herdr. `cmd_new` must re-run just that one hook itself when reusing.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    reused_path = tmp_path / "reused-worktree"
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [])
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
+    monkeypatch.setattr(wt, "switch", lambda repo, branch, **kwargs: {"action": "existing", "path": str(reused_path)})
+    hook_calls: list[tuple[Path, str]] = []
+    monkeypatch.setattr(wt, "run_post_start_hook", lambda worktree, name: hook_calls.append((worktree, name)) or True)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "existing-branch", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert hook_calls == [(reused_path, "herdr")]
+
+
+def test_new_creating_a_worktree_does_not_rerun_the_herdr_post_start_hook(tmp_path, monkeypatch):
+    """Creation already runs every post-start hook (including `herdr`) via
+    `wt switch --create` itself, so `cmd_new` must not re-run it a second
+    time on top of that.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+    hook_calls: list[tuple[Path, str]] = []
+    monkeypatch.setattr(wt, "run_post_start_hook", lambda worktree, name: hook_calls.append((worktree, name)) or True)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0
+    assert len(switch_calls) == 1
+    assert hook_calls == []
+
+
 def test_list_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)

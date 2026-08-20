@@ -141,6 +141,30 @@ def switch(
     return _load_json(proc.stdout)
 
 
+def run_post_start_hook(worktree: Path, name: str) -> bool:
+    """Re-run one post-start hook (by NAME) inside an existing WORKTREE.
+
+    `wt switch` without `--create` (i.e. reusing a worktree that already
+    exists) skips post-start hooks entirely, they only fire at creation
+    time. That's a gap for hooks whose effect isn't really about *creating*
+    the worktree but about the worktree *being open right now* (e.g. the
+    `herdr` hook registering it as a workspace in herdr's TUI) — a worktree
+    reused from a fresh terminal, or one that predates the hook being added
+    to the user's wt config, would otherwise never get that side effect.
+
+    Runs `wt -C <worktree> hook post-start <name> -y`, `-C` the WORKTREE
+    itself (not the repo root): post-start hook templates key off being run
+    from inside the worktree they're acting on. `-y` skips the interactive
+    approval prompt project-level hooks would otherwise trigger, matching
+    how post-start hooks already run silently at creation time. Best-effort:
+    returns whether it succeeded rather than raising, a hook hiccup (or `wt`
+    not knowing about a hook by that name in some config) should never block
+    the worktree switch that already happened.
+    """
+    proc = run(["hook", "post-start", name, "-y"], cwd=worktree, check=False)
+    return proc.returncode == 0
+
+
 def remove(repo: Path, branch: str, *, yes: bool = True, force: bool = False, force_delete: bool = False) -> None:
     args = ["remove", branch]
     if yes:

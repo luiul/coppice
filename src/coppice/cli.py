@@ -204,8 +204,18 @@ def cmd_new(
 
     repo.register_repo(repo_root)
 
-    verb = "Created" if result.get("action") == "created" else "Reused"
+    created = result.get("action") == "created"
+    verb = "Created" if created else "Reused"
     result_path = result.get("path")
+
+    # post-start hooks (VS Code, venv, copy-ignored, herdr registration) only
+    # fire on creation, per wt's own docs, reusing an existing worktree skips
+    # them entirely. Re-run just the herdr one here so a worktree that
+    # predates the hook, or is reused from a fresh terminal, still shows up
+    # in herdr's TUI instead of silently never getting registered.
+    if not created and result_path:
+        wt.run_post_start_hook(Path(result_path), "herdr")
+
     if result_path:
         console.print(f"{verb} worktree for [bold]{branch}[/] @ [green]{_short_path(Path(result_path))}[/]")
     else:
