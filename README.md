@@ -44,12 +44,12 @@ works](#how-the-registry-works)) is the seam between the lifecycle side
 reads it): coppice never has to know understory exists, and understory
 never has to know how a worktree got created. canopy doesn't appear in
 that diagram: it's fully independent of this registry and of the other
-three tools here, discovering agent processes directly (`ps`/`lsof`,
-herdr's own JSON API, AppleScript for Ghostty) rather than anything
-worktree-related. It's included in the table above because the two
-dashboards (canopy, understory) are meant to run side by side, each a
-single-view radar over one kind of thing, agent sessions or worktrees,
-rather than one tool trying to cover both.
+three tools here, discovering agent processes directly via `ps`/`lsof` and
+AppleScript for Ghostty, rather than anything worktree-related. It's
+included in the table above because the two dashboards (canopy, understory)
+are meant to run side by side, each a single-view radar over one kind of
+thing, agent sessions or worktrees, rather than one tool trying to cover
+both.
 
 ## Why
 
