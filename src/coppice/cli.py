@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 from importlib.metadata import PackageNotFoundError, version
@@ -115,6 +116,60 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(1)
 
 
+def _prompt_description(message: str) -> str:
+    """Prompt for the branch description, echoing spaces as dashes live as
+    they're typed rather than only after the fact: `normalize_branch` would
+    turn them into dashes anyway, this just shows that up front.
+
+    Falls back to a plain `typer.prompt` whenever raw per-keystroke echo
+    isn't available or meaningful: piped/non-tty stdin (tests, scripts,
+    non-interactive shells) or non-POSIX platforms without `termios`/`tty`.
+    """
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        return typer.prompt(message, default="", show_default=False)
+
+    try:
+        import termios
+        import tty
+    except ImportError:  # pragma: no cover - non-POSIX platforms
+        return typer.prompt(message, default="", show_default=False)
+
+    sys.stdout.write(f"{message}: ")
+    sys.stdout.flush()
+
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    chars: list[str] = []
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in ("\r", "\n"):
+                break
+            if ch == "\x03":  # Ctrl-C
+                raise KeyboardInterrupt
+            if ch == "\x04" and not chars:  # Ctrl-D on an empty line
+                raise typer.Exit(1)
+            if ch in ("\x7f", "\x08"):  # backspace
+                if chars:
+                    chars.pop()
+                    sys.stdout.write("\b \b")
+                    sys.stdout.flush()
+                continue
+            if ch == " ":
+                ch = "-"
+            if ch.isprintable():
+                chars.append(ch)
+                sys.stdout.write(ch)
+                sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+        sys.stdout.write("\n")
+        sys.stdout.flush()
+
+    return "".join(chars)
+
+
 def _print_existing_worktrees(repo_root: Path) -> None:
     """Show what's already in flight before prompting for a new branch,
     to avoid accidentally starting a near-duplicate of existing work.
@@ -175,11 +230,7 @@ def cmd_new(
     _print_existing_worktrees(repo_root)
 
     if branch is None:
-        description = typer.prompt(
-            "Short branch description (optional, enter for a timestamp id)",
-            default="",
-            show_default=False,
-        )
+        description = _prompt_description("Short branch description (optional, enter for a timestamp id)")
         if description.strip():
             branch = branch_mod.normalize_branch(description)
         else:
