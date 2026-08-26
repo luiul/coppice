@@ -276,6 +276,35 @@ def test_list_without_wt_fails_clearly(tmp_path, monkeypatch):
     assert "Traceback" not in result.output
 
 
+def test_list_flags_stale_worktrees(tmp_path, monkeypatch):
+    """A prunable (dangling) worktree reference must stand out in `list`,
+    not blend in as if it were just another clean, healthy worktree: its
+    'Working tree' cell should read '-' (there's no directory left to be
+    clean or dirty), and the run's summary should call out the stale count
+    by name so it's obvious 'coppice clean' has something to do.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("stale-branch", tmp_path / "gone", stale=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"])
+
+    assert result.exit_code == 0, result.output
+    assert "stale-branch" in result.output
+    assert "stale" in result.output
+    flat_output = result.output.replace("\n", "")
+    assert "1 stale (dangling) reference(s)" in flat_output
+    assert "remove" in flat_output
+    # no misleading 'clean' working-tree label for a gone directory (the
+    # only legitimate mention of 'clean' on the page is the "run 'coppice
+    # clean'" tip)
+    assert "clean" not in flat_output.replace("copclean", "").replace("cop clean", "")
+
+
 def test_remove_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)
@@ -485,6 +514,32 @@ def test_status_reports_wt_and_registry(tmp_path, monkeypatch):
     assert "wt v9.9.9" in flat_output
     assert cli._short_path(repo_dir) in flat_output
     assert "1 worktree(s)" in flat_output
+
+
+def test_status_reports_stale_worktrees(tmp_path, monkeypatch):
+    """A registered repo with a dangling worktree reference should be
+    flagged in `status`'s Status column and rolled up into the final
+    summary, not silently reported as 'ok' alongside genuinely healthy
+    repos.
+    """
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    repo_dir = _init_repo(tmp_path / "repo")
+    repo.register_repo(repo_dir)
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a[0], 0, "wt v9.9.9\n", ""))
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("stale-branch", tmp_path / "gone", stale=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["status"])
+
+    assert result.exit_code == 0, result.output
+    flat_output = result.output.replace("\n", "")
+    assert "1 stale" in flat_output
+    assert "1 stale (dangling) reference(s)" in flat_output
+    assert "cop clean" in flat_output
 
 
 def test_status_without_wt_still_lists_registry(tmp_path, monkeypatch):

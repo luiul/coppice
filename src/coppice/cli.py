@@ -128,7 +128,7 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     if not others:
         return
     console.print(f"Existing worktrees for {_repo_header(repo_root)}:")
-    table, _total_kb = _worktrees_table(others, show_size=False)
+    table, _total_kb, _n_stale = _worktrees_table(others, show_size=False)
     console.print(table)
 
 
@@ -257,7 +257,7 @@ def _age_seconds(entry: dict[str, Any]) -> float | None:
     the worktree is `prunable` (its directory is already gone, so "age" is
     meaningless, it's always a removal candidate regardless).
     """
-    if entry.get("worktree", {}).get("state") == "prunable":
+    if _is_stale(entry):
         return None
     if not entry.get("is_main") and (creation_ts := _creation_ts(Path(entry["path"]))) is not None:
         return time.time() - creation_ts
@@ -267,11 +267,44 @@ def _age_seconds(entry: dict[str, Any]) -> float | None:
     return time.time() - ts
 
 
+def _is_stale(entry: dict[str, Any]) -> bool:
+    """Whether ENTRY is a prunable/stale worktree reference: its directory
+    is already gone (removed by hand, an OS temp dir that got reaped, a
+    `git worktree remove` run outside `wt`, etc.), so its age, size,
+    working-tree cleanliness, and merge status are all moot, `wt` still
+    carries a dangling registration for it and it's always a
+    `clean`/`remove` candidate regardless of every other check.
+
+    Centralizes the single `worktree.state == "prunable"` check every one of
+    those call sites used to repeat inline, so "stale" means exactly one
+    thing everywhere it's asked about: here, `clean`'s scan, and `list`'s
+    red-flagged row.
+    """
+    return entry.get("worktree", {}).get("state") == "prunable"
+
+
 def _age_days(entry: dict[str, Any]) -> str:
-    if entry.get("worktree", {}).get("state") == "prunable":
+    """Plain-text age label: 'stale' for a dangling reference, '?' when
+    unknown, else 'Nd'. Deliberately markup-free, its other caller
+    (`_pick_branches_interactively`'s fzf input) renders this as literal
+    text, not through Rich, so `[red]stale[/]` there would show up as the
+    literal tag instead of a color. `_age_cell` below wraps this for the
+    `list` table, where Rich markup does render.
+    """
+    if _is_stale(entry):
         return "stale"
     seconds = _age_seconds(entry)
     return f"{int(seconds / 86400)}d" if seconds is not None else "?"
+
+
+def _age_cell(entry: dict[str, Any]) -> str:
+    """Rich-markup Age cell for the `list` table: `_age_days`'s label, with
+    a stale entry's "stale" wrapped in [red] so a dangling reference
+    actually stands out at a glance in a table full of otherwise-similar
+    'Nd' values, instead of reading like just another row.
+    """
+    label = _age_days(entry)
+    return f"[red]{label}[/]" if _is_stale(entry) else label
 
 
 def _is_dirty(entry: dict[str, Any]) -> bool:
@@ -316,7 +349,7 @@ def _worktree_size_kb(entry: dict[str, Any], size_cache: dict[Path, int] | None 
     parallel, rather than one at a time here). Falls back to a direct,
     single-path `dir_size_kb` call otherwise.
     """
-    if entry.get("worktree", {}).get("state") == "prunable":
+    if _is_stale(entry):
         return None
     path = entry.get("path")
     if not path:
@@ -331,9 +364,7 @@ def _sizeable_paths(worktrees: list[dict[str, Any]]) -> list[Path]:
     WORKTREES that isn't prunable and has a path, i.e. exactly the entries
     `_worktree_size_kb` would otherwise walk one at a time.
     """
-    return [
-        Path(path) for w in worktrees if w.get("worktree", {}).get("state") != "prunable" and (path := w.get("path"))
-    ]
+    return [Path(path) for w in worktrees if not _is_stale(w) and (path := w.get("path"))]
 
 
 def _merge_status(entry: dict[str, Any]) -> tuple[str, str]:
@@ -343,7 +374,7 @@ def _merge_status(entry: dict[str, Any]) -> tuple[str, str]:
     a prunable/stale entry (its branch's relationship to main is moot once
     the worktree directory is already gone).
     """
-    if entry.get("is_main") or entry.get("worktree", {}).get("state") == "prunable":
+    if entry.get("is_main") or _is_stale(entry):
         return "-", "dim"
     main_state = entry.get("main_state")
     if main_state in ("empty", "integrated"):
@@ -355,11 +386,19 @@ def _merge_status(entry: dict[str, Any]) -> tuple[str, str]:
 
 def _worktrees_table(
     worktrees: list[dict[str, Any]], *, show_size: bool = True, size_cache: dict[Path, int] | None = None
-) -> tuple[Table, int]:
+) -> tuple[Table, int, int]:
     """Rich table for WORKTREES: branch ('current' is conveyed by the
     bold-green style instead of its own column, one less repeated 'current'
     per row), age, optionally on-disk size, working-tree cleanliness, and
     merge status.
+
+    A stale (dangling, `wt`-prunable) entry gets its own visual treatment
+    instead of blending in: branch and age both render in [red], and
+    'Working tree' shows a plain '-' rather than computing dirty/clean
+    against a `working_tree` dict that's empty because the directory is
+    already gone (that would otherwise misreport it as 'clean', implying
+    there's a harmless, tidy worktree sitting there rather than a dangling
+    reference `clean`/`remove` should clear out).
 
     Callers are expected to have already filtered out the main worktree
     (see `_render_repo_worktrees`/`_print_existing_worktrees`): it isn't a
@@ -369,10 +408,10 @@ def _worktrees_table(
 
     Shared by `list`'s per-repo rendering and `new`'s pre-prompt "here's
     what's already in flight" preview, so a worktree looks the same wherever
-    `coppice` shows one. Returns the table plus the summed on-disk size in
-    KB (0 when SHOW_SIZE is False or every entry's size is unknown), so
-    callers can roll up a total without walking each worktree's directory
-    a second time.
+    `coppice` shows one. Returns the table, the summed on-disk size in KB
+    (0 when SHOW_SIZE is False or every entry's size is unknown), and the
+    count of stale entries, so callers can roll up totals without walking
+    each worktree's directory or re-checking its state a second time.
     """
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Branch")
@@ -383,14 +422,23 @@ def _worktrees_table(
     table.add_column("Merge")
 
     total_kb = 0
+    n_stale = 0
     for w in worktrees:
+        stale = _is_stale(w)
+        if stale:
+            n_stale += 1
         branch = w.get("branch") or "?"
-        branch_cell = f"[bold green]{branch}[/]" if w.get("is_current") else branch
+        if stale:
+            branch_cell = f"[red]{branch}[/]"
+        elif w.get("is_current"):
+            branch_cell = f"[bold green]{branch}[/]"
+        else:
+            branch_cell = branch
 
-        working_tree = "[yellow]dirty[/]" if _is_dirty(w) else "[dim]clean[/]"
+        working_tree = "[dim]-[/]" if stale else ("[yellow]dirty[/]" if _is_dirty(w) else "[dim]clean[/]")
         merge_label, merge_style = _merge_status(w)
 
-        row = [branch_cell, _age_days(w)]
+        row = [branch_cell, _age_cell(w)]
         if show_size:
             size_kb = _worktree_size_kb(w, size_cache)
             total_kb += size_kb or 0
@@ -398,7 +446,7 @@ def _worktrees_table(
         row += [working_tree, f"[{merge_style}]{merge_label}[/]"]
         table.add_row(*row)
 
-    return table, total_kb
+    return table, total_kb, n_stale
 
 
 def _render_repo_worktrees(
@@ -407,9 +455,9 @@ def _render_repo_worktrees(
     *,
     show_size: bool = True,
     size_cache: dict[Path, int] | None = None,
-) -> tuple[int, int]:
+) -> tuple[int, int, int]:
     """Print WORKTREES under a repo-name heading. Returns (worktree count,
-    summed on-disk size in KB) for the caller's running total.
+    summed on-disk size in KB, stale count) for the caller's running total.
 
     The main worktree is the repo itself, not something coppice manages
     alongside it, so it never gets counted or gets a row of its own here
@@ -425,7 +473,7 @@ def _render_repo_worktrees(
     worktrees stand out.
     """
     if not worktrees:
-        return 0, 0
+        return 0, 0, 0
 
     main_entry = next((w for w in worktrees if w.get("is_main")), None)
     path = Path(main_entry["path"]) if main_entry and main_entry.get("path") else None
@@ -439,18 +487,18 @@ def _render_repo_worktrees(
     if not others:
         if main_entry is None:
             console.print(title)
-            return 0, 0
+            return 0, 0, 0
         size_kb = _worktree_size_kb(main_entry, size_cache) if show_size else None
         bits = [sizes.human_kb(size_kb)] if size_kb else []
         bits.append("[yellow]dirty[/]" if _is_dirty(main_entry) else "clean")
         sep = "  \u00b7  "
         console.print(f"{title} [dim]no other worktrees \u00b7 {sep.join(bits)}[/]")
-        return 0, size_kb or 0
+        return 0, size_kb or 0, 0
 
-    table, total_kb = _worktrees_table(others, show_size=show_size, size_cache=size_cache)
+    table, total_kb, n_stale = _worktrees_table(others, show_size=show_size, size_cache=size_cache)
     console.print(title)
     console.print(table)
-    return len(others), total_kb
+    return len(others), total_kb, n_stale
 
 
 @app.command("list", rich_help_panel="Inspect")
@@ -520,17 +568,21 @@ def cmd_list(
 
     total = 0
     total_kb = 0
+    total_stale = 0
     for repo_root in repos:
-        n, size_kb = _render_repo_worktrees(
+        n, size_kb, n_stale = _render_repo_worktrees(
             repo_root, worktrees_by_repo[repo_root], show_size=show_size, size_cache=size_cache
         )
         total += n
         total_kb += size_kb
+        total_stale += n_stale
 
     console.print()
     summary = f"Total: {total} worktree(s) across {len(repos)} repo(s)."
     if show_size and total_kb:
         summary += f" {sizes.human_kb(total_kb)} on disk."
+    if total_stale:
+        summary += f" [red]{total_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove."
     console.print(summary)
 
 
@@ -809,10 +861,10 @@ def cmd_clean(
             n_worktrees += 1
             branch_name = w["branch"]
 
-            if w.get("worktree", {}).get("state") == "prunable":
+            if _is_stale(w):
                 n_stale += 1
                 lines.append(
-                    f"  [green]rm[/]    stale  {branch_name}  (worktree directory is gone; cleaning up the dangling reference)"
+                    f"  [green]rm[/]    [red]stale[/]  {branch_name}  (worktree directory is gone; cleaning up the dangling reference)"
                 )
                 candidates.append((repo_root, branch_name, -1))
                 continue
@@ -995,6 +1047,7 @@ def cmd_status(
 
     total = 0
     total_kb = 0
+    total_stale = 0
 
     # Only repos that actually exist and can be checked (wt installed) are
     # worth a `wt list` call; everything else renders a fixed row below
@@ -1042,13 +1095,15 @@ def cmd_status(
 
             worktrees = worktrees_by_repo.get(repo_root, [])
             extra_count = sum(1 for w in worktrees if not w.get("is_main"))
+            stale_count = sum(1 for w in worktrees if _is_stale(w))
             total += extra_count
+            total_stale += stale_count
             row = [_short_path(repo_root), str(extra_count)]
             if show_size:
                 size_kb = sum(s for w in worktrees if (s := _worktree_size_kb(w, size_cache)) is not None)
                 total_kb += size_kb
                 row.append(sizes.human_kb(size_kb))
-            row.append("[green]ok[/]")
+            row.append(f"[red]{stale_count} stale[/]" if stale_count else "[green]ok[/]")
             table.add_row(*row)
 
         spinner.stop()
@@ -1070,6 +1125,8 @@ def cmd_status(
         summary = f"Total: {total} worktree(s) across {len(known) - len(missing)} repo(s)."
         if show_size and total_kb:
             summary += f" {sizes.human_kb(total_kb)} on disk."
+        if total_stale:
+            summary += f" [red]{total_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove."
         console.print(summary)
 
 
