@@ -124,6 +124,12 @@ _STYLE_DIRTY = "yellow"
 _STYLE_STALE = "bold red"
 _STYLE_CURRENT = "bold green"
 
+# Output spacing convention: one blank line before a command's first output
+# line and one after its last (breathing room against the shell prompt on
+# both sides), and one blank line between logical blocks within a command
+# (tables, prompts, action logs, summaries). Never in --json output
+# (machine-readable), stderr error paths, or 'shell init' (eval'd code).
+
 
 def _fail(message: str) -> typer.Exit:
     err.print(f"[red]Error:[/] {message}")
@@ -150,6 +156,7 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     console.print(f"Existing worktrees for {_repo_header(repo_root)}:")
     table, _total_kb, _n_stale = _worktrees_table(others, show_size=False)
     console.print(table)
+    console.print()
 
 
 @app.command("new", rich_help_panel="Create")
@@ -192,6 +199,7 @@ def cmd_new(
     except wt.WtNotFoundError as exc:
         raise _fail(str(exc)) from exc
 
+    console.print()
     _print_existing_worktrees(repo_root)
 
     if branch is None:
@@ -209,13 +217,13 @@ def cmd_new(
     console.print(f"Worktree branch: [bold]{branch}[/]")
 
     create = not (wt.branch_exists(repo_root, branch) or wt.remote_branch_exists(repo_root, branch))
-    if (
-        not create
-        and not yes
-        and not typer.confirm(f"Branch '{branch}' already exists. Switch to its worktree instead?", default=False)
-    ):
-        console.print("Cancelled.")
-        raise typer.Exit(1)
+    if not create and not yes:
+        console.print()
+        if not typer.confirm(f"Branch '{branch}' already exists. Switch to its worktree instead?", default=False):
+            console.print()
+            console.print("Cancelled.")
+            console.print()
+            raise typer.Exit(1)
 
     # Resolve the actual base ourselves rather than leaving it to `wt`'s own
     # (cached, and so potentially stale, see repo.default_branch) default-
@@ -245,6 +253,7 @@ def cmd_new(
     # makes the actual base visible at a glance instead of requiring a dig
     # through `git log` after the fact to notice it forked from the wrong
     # place.
+    console.print()
     from_suffix = f" from [bold]{base_branch}[/]" if base_branch else ""
     if result_path:
         console.print(
@@ -252,6 +261,7 @@ def cmd_new(
         )
     else:
         console.print(f"{verb} worktree for [bold]{branch}[/]{from_suffix}")
+    console.print()
 
     if result_path:
         shell.write_cd_file(Path(result_path))
@@ -633,9 +643,9 @@ def _render_list(
 
     if total == 0:
         # Nothing but empty repos, and they're shown: plain one-liners read
-        # better than a table with no worktree rows.
+        # better than a table with no worktree rows. No blank lines here,
+        # the caller owns the outer spacing.
         for repo_root, main_entry, _ in sections:
-            console.print()
             console.print(f"{_list_section_heading(repo_root, main_entry)} {_one_liner_note(main_entry)}")
         return 0, total_kb, 0, n_hidden
 
@@ -665,7 +675,6 @@ def _render_list(
         cells += ["", ""]
         return cells
 
-    console.print()
     for i, (repo_root, main_entry, others) in enumerate(sections):
         last_section = i == len(sections) - 1
         # Section breaks separate a repo with worktrees from its neighbors;
@@ -759,6 +768,7 @@ def cmd_list(
     # all in one batch (with progress on the spinner) so that walk happens
     # in parallel across every worktree in every repo instead of one at a
     # time.
+    console.print()
     with console.status("[dim]Listing worktrees…[/dim]") as spinner:
         spinner.update(f"[dim]Listing worktrees for {_plural(len(repos), 'repo')}…[/dim]")
         worktrees_by_repo: dict[Path, list[dict[str, Any]]] = wt.list_worktrees_many(repos)
@@ -787,12 +797,12 @@ def cmd_list(
     )
 
     if total == 0:
-        console.print()
         if n_hidden:
             # Everything in scope is a repo with no extra worktrees, and
             # the default view hides those, so say so instead of printing
             # an empty table.
             console.print(f"No worktrees across {_plural(len(repos), 'repo')}. Create one: [cyan]cop new PATH[/]")
+        console.print()
         return
 
     # State rollup across every listed worktree, so the closing line reads
@@ -826,6 +836,7 @@ def cmd_list(
         console.print(f"[red]{total_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove.")
     if n_hidden:
         console.print(f"[dim]{_plural(n_hidden, 'more repo')} with no extra worktrees (show with: cop list --all)[/]")
+    console.print()
 
 
 def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[dict[str, Any]]]) -> list[str] | None:
@@ -868,6 +879,7 @@ def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[d
     )
     if proc.returncode != 0 or not proc.stdout.strip():
         console.print("Cancelled.")
+        console.print()
         return None
 
     picked = [int(line.split("\t", 1)[0]) for line in proc.stdout.splitlines() if line.strip()]
@@ -962,14 +974,20 @@ def cmd_remove(
             err.print(f"  - {f}")
         raise typer.Exit(1)
 
+    console.print()
     console.print(f"About to remove {_plural(len(targets), 'worktree')}:")
     for target, branch_name in targets:
         console.print(f"  {branch_name} @ {target.name}")
 
-    if not yes and not typer.confirm(f"Remove the {_plural(len(targets), 'worktree')} listed above?", default=False):
-        console.print("Cancelled.")
-        raise typer.Exit(1)
+    if not yes:
+        console.print()
+        if not typer.confirm(f"Remove the {_plural(len(targets), 'worktree')} listed above?", default=False):
+            console.print()
+            console.print("Cancelled.")
+            console.print()
+            raise typer.Exit(1)
 
+    console.print()
     n_removed = 0
     for target, branch_name in targets:
         console.print(f"Removing '{branch_name}' @ {target.name}...")
@@ -982,12 +1000,15 @@ def cmd_remove(
             n_removed += 1
 
     if failures:
+        console.print()
         err.print(f"[red]Removed {_plural(n_removed, 'worktree')}, {len(failures)} failed:[/]")
         for f in failures:
             err.print(f"  - {f}")
         raise typer.Exit(1)
 
+    console.print()
     console.print(f"Removed {_plural(n_removed, 'worktree')}.")
+    console.print()
 
 
 def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
@@ -1072,6 +1093,7 @@ def cmd_clean(
     threshold_seconds = days * 86400
     have_gh = shutil.which("gh") is not None
 
+    console.print()
     if merged:
         console.print(f"Scanning {_plural(len(scope), 'repo')} for merged worktrees (any age)...")
     else:
@@ -1234,6 +1256,7 @@ def cmd_clean(
 
     if not candidates:
         console.print("Nothing to clean.")
+        console.print()
         return
 
     total_kb = sum(size_kb for _, _, size_kb in candidates if size_kb > 0)
@@ -1242,12 +1265,18 @@ def cmd_clean(
 
     if dry_run:
         console.print("Dry run, nothing removed.")
+        console.print()
         return
 
-    if not yes and not typer.confirm(f"Remove {_plural(len(candidates), 'worktree')} above?", default=False):
-        console.print("Cancelled.")
-        raise typer.Exit(1)
+    if not yes:
+        console.print()
+        if not typer.confirm(f"Remove {_plural(len(candidates), 'worktree')} above?", default=False):
+            console.print()
+            console.print("Cancelled.")
+            console.print()
+            raise typer.Exit(1)
 
+    console.print()
     n_removed = 0
     failed: list[str] = []
     for repo_root, branch_name, size_kb in candidates:
@@ -1264,6 +1293,7 @@ def cmd_clean(
     console.print()
     if not failed:
         console.print(f"Removed {_plural(n_removed, 'worktree')}.")
+        console.print()
     else:
         err.print(f"[red]Removed {_plural(n_removed, 'worktree')}, {len(failed)} failed:[/]")
         for f in failed:
@@ -1286,6 +1316,7 @@ def cmd_status(
     Deliberately minimal and generic: no project-specific tool checks here,
     those belong outside coppice for whichever project cares about them.
     """
+    console.print()
     wt_path = shutil.which("wt")
     if wt_path is not None:
         version_proc = subprocess.run(["wt", "--version"], capture_output=True, text=True)
@@ -1302,6 +1333,7 @@ def cmd_status(
         console.print(
             f"Known repos [dim]({_short_path(repo.REGISTRY_PATH)})[/]: none yet. Run 'coppice new' at least once."
         )
+        console.print()
         return
 
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
@@ -1392,6 +1424,7 @@ def cmd_status(
 
     console.print(f"Known repos [dim]({_short_path(repo.REGISTRY_PATH)})[/]:")
     console.print(table)
+    console.print()
 
     # Registered repos vanish for reasons coppice doesn't control (a
     # scratch repo removed by hand, a `wt`-hook-registered temp repo whose
@@ -1410,6 +1443,7 @@ def cmd_status(
         if total_stale:
             summary += f" [red]{total_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove."
         console.print(summary)
+        console.print()
 
 
 shell_app = typer.Typer(help="cd integration for 'new' (see 'coppice shell init --help'). Works for 'cop' too.")

@@ -311,6 +311,7 @@ and there's nothing for `cop remove`/`cop clean` to act on.
 ```console
 $ cop new ~/dbt-models --branch add-customer-id-column
 Worktree branch: add-customer-id-column
+
 Created worktree for add-customer-id-column @ /Users/you/dbt-models/.worktrees/add-customer-id-column
 
 $ cop list
@@ -417,7 +418,7 @@ wrapper, `new` still works, it just prints the path instead of moving you
 there:
 
 ```bash
-cd "$(cop new . --branch update-dag-schedule | tail -1 | sed 's/.* @ //')"
+cd "$(cop new . --branch update-dag-schedule | sed -n 's/.* @ //p' | tail -1)"
 ```
 
 ## Status
