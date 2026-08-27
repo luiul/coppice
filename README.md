@@ -315,7 +315,7 @@ Worktree branch: add-customer-id-column
 Created worktree for add-customer-id-column @ /Users/you/dbt-models/.worktrees/add-customer-id-column
 
 $ cop list
-Branch                          Age   Size    Working tree   Merge
+Branch                      Created   Size    Working tree   Merge
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 airflow-dags (main: master)
   update-dag-schedule           1d    312M    clean          merged

@@ -344,7 +344,7 @@ def _age_label(entry: dict[str, Any]) -> str:
 
 
 def _age_cell(entry: dict[str, Any]) -> str:
-    """Rich-markup Age cell for worktree tables: `_age_label`'s label, with
+    """Rich-markup Created cell for worktree tables: `_age_label`'s label, with
     a stale entry's "stale" wrapped in red so a dangling reference actually
     stands out at a glance in a table full of otherwise-similar age values,
     instead of reading like just another row.
@@ -535,7 +535,7 @@ def _worktrees_table(
     """
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Branch")
-    table.add_column("Age", justify="right")
+    table.add_column("Created", justify="right")
     if show_size:
         table.add_column("Size", justify="right")
     table.add_column("Working tree")
@@ -651,7 +651,7 @@ def _render_list(
 
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Branch")
-    table.add_column("Age", justify="right")
+    table.add_column("Created", justify="right")
     if show_size:
         table.add_column("Size", justify="right")
     if verbose:
