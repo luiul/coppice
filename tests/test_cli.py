@@ -305,6 +305,106 @@ def test_list_flags_stale_worktrees(tmp_path, monkeypatch):
     assert "clean" not in flat_output.replace("copclean", "").replace("cop clean", "")
 
 
+def test_list_json_emits_valid_json(tmp_path, monkeypatch):
+    """`list --json` pipes into jq & co., so stdout must be parseable JSON
+    even when a field is longer than the console width: Rich soft-wraps at
+    80 columns when stdout isn't a tty, which used to corrupt string values
+    with literal newlines.
+    """
+    import json
+
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [repo_dir])
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feature", tmp_path / "feature")]
+    for e in entries:
+        e["commit"] = {"sha": "abc", "message": "x" * 200, "timestamp": 1}
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    assert {e["repo"] for e in data} == {"repo"}
+    assert {e["branch"] for e in data} == {"main", "feature"}
+
+
+def test_list_hides_repos_without_extra_worktrees_by_default(tmp_path, monkeypatch):
+    """With several repos in scope, ones with no extra worktrees are noise
+    next to ones that do: hidden by default (rolled up into a closing
+    line), shown with --all.
+    """
+    busy = _init_repo(tmp_path / "busy")
+    quiet = _init_repo(tmp_path / "quiet")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [busy, quiet])
+    entries = {
+        busy: [_entry("main", busy, is_main=True), _entry("feature", tmp_path / "feature")],
+        quiet: [_entry("main", quiet, is_main=True)],
+    }
+    monkeypatch.setattr(wt, "list_worktrees", lambda r: entries[r])
+
+    result = runner.invoke(app, ["list", "--no-size"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    assert "busy" in result.output
+    assert "feature" in result.output
+    assert "quiet" not in result.output
+    assert "1 more repo with no extra worktrees" in result.output
+    assert "--all" in result.output
+
+    result_all = runner.invoke(app, ["list", "--no-size", "--all"], env={"COLUMNS": "160"})
+    assert result_all.exit_code == 0, result_all.output
+    assert "quiet" in result_all.output
+    assert "no extra worktrees" in result_all.output
+
+
+def test_list_summary_pluralizes_singular(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feature", tmp_path / "feature")]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 worktree in 1 repo." in result.output
+    assert "worktree(s)" not in result.output
+
+
+def test_list_empty_state_when_no_worktrees_anywhere(tmp_path, monkeypatch):
+    """Nothing anywhere (and repos hidden by default) should read as a
+    friendly empty state, not an empty table."""
+    repo_a = _init_repo(tmp_path / "repo-a")
+    repo_b = _init_repo(tmp_path / "repo-b")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [repo_a, repo_b])
+    monkeypatch.setattr(wt, "list_worktrees", lambda r: [_entry("main", r, is_main=True)])
+
+    result = runner.invoke(app, ["list", "--no-size"])
+
+    assert result.exit_code == 0, result.output
+    assert "No worktrees across 2 repos." in result.output
+    assert "cop new" in result.output
+
+
+def test_list_verbose_shows_paths(tmp_path, monkeypatch):
+    """--verbose answers 'where is it': a Path column per worktree, and the
+    repo's own path back in the section heading."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feature", tmp_path / "feature")]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size", "--verbose"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    assert "Path" in result.output
+    flat_output = result.output.replace("\n", "")
+    assert cli._short_path(tmp_path / "feature", max_len=40) in flat_output
+    assert cli._short_path(repo_dir, max_len=40) in flat_output
+
+
 def test_remove_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)
@@ -348,6 +448,7 @@ def test_clean_dry_run_categorizes_candidates(tmp_path, monkeypatch):
         _entry("pr-branch", tmp_path / "pr", commit_ts=now - old_seconds),
         _entry("mergeable-branch", tmp_path / "mergeable", commit_ts=now - old_seconds, main_state="integrated"),
         _entry("unmerged-branch", tmp_path / "unmerged", commit_ts=now - old_seconds, main_state="ahead"),
+        _entry("conflict-branch", tmp_path / "conflict", commit_ts=now - old_seconds, main_state="would_conflict"),
         _entry("stale-branch", tmp_path / "stale", stale=True),
         _entry("main", tmp_path / "repo", is_main=True),
     ]
@@ -364,11 +465,14 @@ def test_clean_dry_run_categorizes_candidates(tmp_path, monkeypatch):
     assert "pr-branch" in result.output and "open PR #42 Some PR" in result.output
     assert "mergeable-branch" in result.output and "merged" in result.output
     assert "unmerged-branch" in result.output and "unmerged" in result.output
+    # a would_conflict branch is still removable by age, but the preview
+    # must say so in wt's vocabulary, not "merge status unknown"
+    assert "conflict-branch" in result.output and "would conflict" in result.output
     assert "stale-branch" in result.output and "stale" in result.output
     assert "main" not in result.output.replace("Scanned", "").replace("remain", "")
     assert "Dry run, nothing removed." in result.output
-    # 3 removable: mergeable-branch, unmerged-branch, stale-branch.
-    assert "3 removable" in result.output
+    # 4 removable: mergeable-branch, unmerged-branch, conflict-branch, stale-branch.
+    assert "4 removable" in result.output
 
 
 def test_clean_nothing_to_clean(tmp_path, monkeypatch):
@@ -413,6 +517,86 @@ def test_clean_merged_ignores_age(tmp_path, monkeypatch):
     assert "1 removable" in result.output
 
 
+def test_clean_merged_removable_set(tmp_path, monkeypatch):
+    """--merged's removable set is the whole merged bucket: `behind` loses
+    no committed work, and a clean `same_commit` equals `empty`. `diverged`
+    and `would_conflict` always stay kept, and a dirty `same_commit` is
+    still protected by the dirty skip, not by the merge filter.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    old_seconds = 30 * 86400
+
+    entries = [
+        _entry("behind-main", tmp_path / "behind", commit_ts=now - old_seconds, main_state="behind"),
+        _entry("at-main", tmp_path / "same", commit_ts=now - old_seconds, main_state="same_commit"),
+        _entry("dirty-at-main", tmp_path / "dirty-same", commit_ts=now - old_seconds, main_state="same_commit", dirty=True),
+        _entry("diverged-branch", tmp_path / "diverged", commit_ts=now - old_seconds, main_state="diverged"),
+        _entry("conflict-branch", tmp_path / "conflict", commit_ts=now - old_seconds, main_state="would_conflict"),
+        _entry("main", tmp_path / "repo", is_main=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--merged", "--dry-run", "--verbose"])
+
+    assert result.exit_code == 0, result.output
+    assert "behind-main" in result.output and "merged, branch will be deleted" in result.output
+    assert "at-main" in result.output
+    assert "dirty-at-main" in result.output and "uncommitted changes" in result.output
+    assert "diverged-branch" in result.output and "not merged" in result.output
+    assert "conflict-branch" in result.output and "not merged" in result.output
+    # 2 removable: behind-main, at-main.
+    assert "2 removable" in result.output
+
+
+def test_merge_status_surfaces_full_main_state_vocabulary(tmp_path):
+    """The list table's Merge column maps wt's whole `main_state`
+    vocabulary onto four buckets, instead of dropping six of nine states
+    into a fallback 'unknown'."""
+    cases = {
+        "empty": ("merged", "green"),
+        "integrated": ("merged", "green"),
+        "same_commit": ("merged", "green"),
+        "behind": ("merged", "green"),
+        "ahead": ("unmerged", "cyan"),
+        "diverged": ("unmerged", "cyan"),
+        "would_conflict": ("conflict", "red"),
+        "orphan": ("unknown", "dim"),
+        "some_future_state": ("unknown", "dim"),
+    }
+    for main_state, expected in cases.items():
+        entry = _entry("branch", tmp_path / main_state, main_state=main_state)
+        assert cli._merge_status(entry) == expected, f"main_state={main_state}"
+
+    # absent main_state (an unremarkable up-to-date branch) is unknown too
+    entry = _entry("branch", tmp_path / "absent")
+    del entry["main_state"]
+    assert cli._merge_status(entry) == ("unknown", "dim")
+
+
+def test_merge_label_speaks_the_same_vocabulary(tmp_path):
+    """`clean`'s removal preview uses the same buckets as the list table:
+    a conflict reads as 'unmerged (would conflict)', an invitation to merge
+    or rebase, never today's 'merge status unknown'."""
+
+    def label(main_state: str, *, force_delete: bool = False) -> str:
+        entry = _entry("branch", tmp_path / f"{main_state}-{force_delete}", main_state=main_state)
+        return cli._merge_label(entry, force_delete=force_delete)
+
+    assert label("integrated") == "merged, branch will be deleted"
+    assert label("behind") == "merged, branch will be deleted"
+    assert label("ahead") == "unmerged, branch will be kept"
+    assert label("diverged") == "unmerged, branch will be kept"
+    assert label("would_conflict") == "unmerged (would conflict), branch will be kept"
+    assert label("orphan") == "merge status unknown, branch will be kept"
+    assert label("would_conflict", force_delete=True) == "unmerged (would conflict), -D will delete the branch too"
+    assert label("ahead", force_delete=True) == "unmerged, -D will delete the branch too"
+
+
 def test_remove_no_branch_no_candidates(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
@@ -437,7 +621,7 @@ def test_remove_partial_failure_reports_both_counts(tmp_path, monkeypatch):
     result = runner.invoke(app, ["remove", "good-branch", "missing-branch", "--repo", str(repo_dir), "--yes"])
 
     assert result.exit_code != 0
-    assert "Removed 1 worktree(s), 1 failed" in result.output
+    assert "Removed 1 worktree, 1 failed" in result.output
     assert "missing-branch" in result.output
 
 
@@ -457,7 +641,7 @@ def test_remove_without_yes_prompts_and_cancels_on_no(tmp_path, monkeypatch):
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
 
     assert result.exit_code != 0
-    assert "Remove the worktree(s) above?" in result.output
+    assert "Remove the 1 worktree listed above?" in result.output
     assert "Cancelled." in result.output
     assert remove_calls == []
 
@@ -473,7 +657,7 @@ def test_remove_without_yes_prompts_and_proceeds_on_yes(tmp_path, monkeypatch):
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="y\n")
 
     assert result.exit_code == 0, result.output
-    assert "Removed 1 worktree(s)." in result.output
+    assert "Removed 1 worktree." in result.output
     assert len(remove_calls) == 1
     # Confirmed once at the coppice level, so `wt remove` is always told
     # `-y` too rather than relying on its own (non-functional, here) prompt.
@@ -511,9 +695,9 @@ def test_status_reports_wt_and_registry(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     flat_output = result.output.replace("\n", "")
-    assert "wt v9.9.9" in flat_output
+    assert "v9.9.9" in flat_output
     assert cli._short_path(repo_dir) in flat_output
-    assert "1 worktree(s)" in flat_output
+    assert "1 worktree across 1 repo" in flat_output
 
 
 def test_status_reports_stale_worktrees(tmp_path, monkeypatch):
@@ -579,6 +763,6 @@ def test_status_prunes_missing_repos_from_registry(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     flat_output = result.output.replace("\n", "")
     assert "missing" in flat_output
-    assert "Pruned 1 missing repo(s)" in flat_output
-    assert "1 repo(s)" in flat_output  # only the live repo counted, not the pruned one
+    assert "Pruned 1 missing repo" in flat_output
+    assert "across 1 repo" in flat_output  # only the live repo counted, not the pruned one
     assert repo.known_repos() == [repo_dir]

@@ -207,7 +207,7 @@ reference.
   worktree"; its branch name shows up folded into the repo heading
   instead (e.g. `(main: master)`), and `remove`/`clean` always skip it.
 - **Current worktree**: whichever one you happen to be standing in when
-  you run a command, shown as `[current]` in `cop list`.
+  you run a command, its branch shown in bold green in `cop list`.
 - **Registry**: the shared list of repos `coppice`/`wt` have seen before
   (`~/.cache/wt/known-repos`), letting `cop list`/`remove`/`clean`
   operate across every repo you've touched.
@@ -281,6 +281,14 @@ Three states `cop list`/`cop clean` report on and act on differently:
   (removed outside `coppice`/`wt`) but git still has a record of it.
   `clean` always removes these, regardless of age or the `--merged` flag.
 
+The Merge column in `cop list` (and `cop clean`'s preview labels) buckets
+`wt`'s `main_state` into `merged` (nothing to integrate, safe to remove),
+`unmerged` (has commits main doesn't, merges cleanly), `conflict` (has
+commits main doesn't, and `wt`'s merge simulation says merging would
+conflict), or `unknown` (`wt` can't relate the branch to main). Only the
+`merged` bucket is removable via `clean --merged`; a `conflict` label is
+an invitation to merge or rebase, never to delete.
+
 ### Branches vs. worktrees, in coppice's commands
 
 coppice identifies things by **branch name**, since that's what you
@@ -306,23 +314,27 @@ Worktree branch: add-customer-id-column
 Created worktree for add-customer-id-column @ /Users/you/dbt-models/.worktrees/add-customer-id-column
 
 $ cop list
-dbt-models:
-  add-customer-id-column  2d [current]
-  fix-ingestion-retry  5d
+Branch                          Age   Size    Working tree   Merge
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+airflow-dags (main: master)
+  update-dag-schedule           1d    312M    clean          merged
+  debug-failing-pipeline        1w    298M    dirty          unmerged
 
-airflow-dags:
-  update-dag-schedule  1d
-  debug-failing-pipeline  9d (dirty)
+dbt-models (main: main)
+  add-customer-id-column        2d    1.1G    clean          unmerged
+  fix-ingestion-retry           5d    1.0G    clean          merged
 
-Total: 4 worktree(s) across 2 repo(s).
+4 worktrees in 2 repos · 2.7G on disk · 2 merged (cop clean --merged) · 1 dirty.
+5 more repos with no extra worktrees (show with: cop list --all)
 
 $ cop clean --dry-run
-Scanning 2 repo(s) for worktrees older than 14d...
+Scanning 2 repos for worktrees older than 14d...
 
-airflow-dags:
-  rm    16d  backfill-2023-orders  (240M on disk, merged, branch will be deleted)
+airflow-dags (~/airflow-dags):
+  rm       2w  backfill-2023-orders  (240M on disk, merged, branch will be deleted)
 
-Total reclaimable: 240M across 1 worktree(s).
+Scanned 2 repos, 5 worktrees: 1 removable, 0 dirty, 0 with an open PR, 4 under 14d old.
+Total reclaimable: 240M across 1 worktree.
 Dry run, nothing removed.
 ```
 
@@ -362,8 +374,10 @@ cop new ~/dbt-models                     # create branch + worktree for the repo
 cop new .                                # ...for the repo you're standing in
 cop new . --branch update-dag-schedule   # skip the prompt, use a specific branch name
 cop new . --branch update-dag-schedule --yes   # skip the "branch already exists, switch to it?" confirmation too
-cop list                                 # table of worktrees (age, size, dirty/merge status) across every known repo
+cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
+cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)
+cop list --verbose                       # ...with a column for each worktree's on-disk path
 cop list --no-size                       # skip the (directory-walking) size column, for a faster listing
 cop list --json                          # same data, as JSON
 cop remove add-customer-id-column        # remove a worktree by branch name (branch itself kept unless merged/-D)
