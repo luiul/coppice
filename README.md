@@ -456,7 +456,7 @@ exclude = [".cop-prompt"]
 vscode = '[ -n "$COP_PROMPT" ] || code -n {{ worktree_path }}'
 
 [post-switch]
-pi-prompt = '[ -n "$COP_PROMPT" ] && "$HOME/.config/worktrunk/cop-prompt-deliver.sh" {{ worktree_path }} {{ repo }} {{ branch }}'
+pi-prompt = '[ -n "$COP_PROMPT" ] && "$HOME/.config/worktrunk/cop-prompt-deliver.sh" "{{ worktree_path }}" "{{ repo }}" "{{ branch }}"'
 ```
 
 One-time setup, per delivery path:
