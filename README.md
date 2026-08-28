@@ -297,7 +297,7 @@ that branch's **worktree**, not the branch itself:
 
 | Command | Takes | Does |
 |---|---|---|
-| `cop new PATH [--branch B] [--base REF]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache), plus a worktree checked out onto it; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y` |
+| `cop new PATH [--branch B] [--base REF] [--prompt TXT]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache), plus a worktree checked out onto it; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y`. With `--prompt`, opens the worktree's VS Code window with `pi` already running `TXT` (setup in [`cop new --prompt`](#cop-new---prompt-start-pi-in-the-new-window)) |
 | `cop list [PATH]` | nothing, or a repo path | lists worktrees, one per checked-out branch, **not** every branch in the repo, and **not** the main worktree (see [Concepts](#concepts)) |
 | `cop remove BRANCH...` | one or more branch **names** | deletes each branch's worktree directory; the branch itself survives unless it's merged or `-D`/`--force-delete` is passed |
 | `cop clean` | filters (age or `--merged`) | the bulk version of `remove`: same branch-vs-worktree distinction applies |
@@ -375,6 +375,7 @@ cop new ~/dbt-models                     # create branch + worktree for the repo
 cop new .                                # ...for the repo you're standing in
 cop new . --branch update-dag-schedule   # skip the prompt, use a specific branch name
 cop new . --branch update-dag-schedule --yes   # skip the "branch already exists, switch to it?" confirmation too
+cop new . -p "fix the flaky login test"  # open the worktree's VS Code window with pi already running this prompt
 cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
 cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)
@@ -403,6 +404,97 @@ configured (see [Automate everything that happens around a
 worktree](#automate-everything-that-happens-around-a-worktree)), or
 otherwise by `coppice new` the first time it touches a repo. After that,
 the repo stays visible to every command from anywhere on disk.
+
+### `cop new --prompt`: start pi in the new window
+
+`cop new . -p "fix the flaky login test"` hands the prompt to `wt`'s hooks
+as `$COP_PROMPT`. With the hook below in your wt config, the worktree's new
+VS Code window then opens with `pi` already running that prompt in its
+integrated terminal, on create and on reuse of an existing worktree alike.
+Without the hook the option is a silent no-op: `cop` only sets the variable.
+
+The mechanics live entirely in wt's user config (see it in context in [my wt
+config](https://github.com/luiul/dotfiles/blob/main/worktrunk/.config/worktrunk/config.toml)):
+a `post-switch` hook writes the prompt to `.cop-prompt` in the worktree,
+drops a `runOn: folderOpen` task into the worktree's `.vscode/tasks.json`
+(merging into the repo's own one when it exists and is plain JSON), and opens
+the window with `code -n`. VS Code runs the folder-open task in a terminal as
+the window loads: the task reads the prompt, deletes `.cop-prompt` (and the
+tasks.json too, when the hook wrote it fresh), and starts `pi`. Reopening the
+folder later runs nothing. A guard on the usual `post-start` window opener
+keeps create-with-prompt from opening two windows, and the `copy-ignored`
+exclude keeps a stray `.cop-prompt` in the main checkout from being reflinked
+over the one the hook just wrote:
+
+```toml
+[step.copy-ignored]
+exclude = [".cop-prompt"]
+
+[post-start]
+vscode = '[ -n "$COP_PROMPT" ] || code -n {{ worktree_path }}'
+
+[post-switch]
+pi-prompt = '''
+if [ -n "$COP_PROMPT" ] && command -v pi >/dev/null 2>&1; then
+  wt="{{ worktree_path }}"
+  printf '%s' "$COP_PROMPT" > "$wt/.cop-prompt"
+  mkdir -p "$wt/.vscode"
+  tj="$wt/.vscode/tasks.json"
+  if [ -f "$tj" ] && command -v jq >/dev/null 2>&1 && jq -e . "$tj" >/dev/null 2>&1; then
+    # Merge into the repo's own (plain-JSON) tasks.json: drop any previous task with our
+    # label, append a fresh one. The file predates us and stays, so this command only
+    # deletes the prompt file, not the tasks.json.
+    cmd='p=$(cat "${workspaceFolder}/.cop-prompt" 2>/dev/null) || exit 0; [ -n "$p" ] || exit 0; rm -f "${workspaceFolder}/.cop-prompt"; pi "$p"'
+    tmp=$(mktemp)
+    jq --arg cmd "$cmd" '
+      .tasks = ((.tasks // []) | map(select(.label != "cop: pi prompt")) + [{
+        label: "cop: pi prompt",
+        type: "shell",
+        command: $cmd,
+        runOptions: { runOn: "folderOpen" },
+        presentation: { reveal: "always", focus: true, panel: "dedicated" },
+        problemMatcher: []
+      }])' "$tj" > "$tmp" && mv "$tmp" "$tj" || echo "cop: could not merge into $tj; prompt left at $wt/.cop-prompt" >&2
+  elif [ ! -f "$tj" ]; then
+    # Fresh write: the task deletes this tasks.json again after reading the prompt,
+    # so reopening the folder later runs nothing at all.
+    cat > "$tj" <<'TASKS'
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "cop: pi prompt",
+      "type": "shell",
+      "command": "p=$(cat \"${workspaceFolder}/.cop-prompt\" 2>/dev/null) || exit 0; [ -n \"$p\" ] || exit 0; rm -f \"${workspaceFolder}/.cop-prompt\" \"${workspaceFolder}/.vscode/tasks.json\"; pi \"$p\"",
+      "runOptions": { "runOn": "folderOpen" },
+      "presentation": { "reveal": "always", "focus": true, "panel": "dedicated" },
+      "problemMatcher": []
+    }
+  ]
+}
+TASKS
+  else
+    # tasks.json exists but isn't plain JSON (JSONC with comments, most likely): jq can't
+    # merge into it, so leave the prompt file in place and say so in wt's logs.
+    echo "cop: $tj exists but is not plain JSON; prompt left at $wt/.cop-prompt" >&2
+  fi
+  code -n "$wt"
+fi
+'''
+```
+
+One-time VS Code setup:
+
+- `"task.allowAutomaticTasks": "on"` in the user settings (or click Allow on
+  the one-time prompt the first folder-open task triggers, which sets the
+  same thing).
+- The worktree directory trusted; VS Code runs no tasks at all in untrusted
+  workspaces.
+- `pi` on `PATH` for the integrated terminal.
+
+`cop` runs a non-blocking preflight on every `--prompt` invocation and prints
+a dim warning when `pi` or the VS Code setting is missing, or when the repo
+already has a `.vscode/tasks.json` the hook will merge into.
 
 ### Shell integration, in more detail
 

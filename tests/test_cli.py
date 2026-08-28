@@ -264,6 +264,96 @@ def test_new_reports_the_resolved_base_branch_it_forked_from(tmp_path, monkeypat
     assert "from master" in result.output
 
 
+def _stub_prompt_preflight(monkeypatch, tmp_path, *, pi: bool = True, automatic_tasks: bool = True) -> None:
+    """Control every input `new --prompt`'s preflight reads: `pi` on PATH (via
+    `_stub_wt`'s which table) and the VS Code user settings file (repointed at
+    a throwaway path so the real one on this machine can't leak into tests).
+    """
+    _stub_wt(monkeypatch, which={"pi": "/usr/bin/pi" if pi else None})
+    settings = tmp_path / "vscode-settings.json"
+    settings.write_text('{"task.allowAutomaticTasks": "on"}' if automatic_tasks else "{}")
+    monkeypatch.setattr(cli, "_VSCODE_SETTINGS_PATH", settings)
+
+
+def test_new_prompt_sets_cop_prompt_in_the_wt_environment(tmp_path, monkeypatch):
+    """The whole feature in one assertion: `--prompt` must reach the `wt`
+    subprocess as COP_PROMPT, where the user's post-switch hook picks it up.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_prompt_preflight(monkeypatch, tmp_path)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--prompt", "fix the flaky login test"])
+
+    assert result.exit_code == 0, result.output
+    assert switch_calls[0]["extra_env"] == {"COP_PROMPT": "fix the flaky login test"}
+    assert "note:" not in result.output
+
+
+def test_new_without_prompt_leaves_the_wt_environment_alone(tmp_path, monkeypatch):
+    """Regression guard: a plain `cop new` must pass no extra env at all, so
+    the prompt hook stays off and everything behaves exactly as before.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_prompt_preflight(monkeypatch, tmp_path, pi=False, automatic_tasks=False)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0, result.output
+    assert switch_calls[0]["extra_env"] is None
+    # no --prompt, no preflight: the missing pieces above must not be reported
+    assert "note:" not in result.output
+
+
+def test_new_prompt_preflight_warns_when_pi_is_missing(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_prompt_preflight(monkeypatch, tmp_path, pi=False)
+    _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "-p", "do a thing"])
+
+    assert result.exit_code == 0, result.output
+    assert "`pi` is not on PATH" in result.output
+    assert "task.allowAutomaticTasks" not in result.output
+
+
+def test_new_prompt_preflight_warns_when_automatic_tasks_are_off(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_prompt_preflight(monkeypatch, tmp_path, automatic_tasks=False)
+    _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "-p", "do a thing"])
+
+    assert result.exit_code == 0, result.output
+    assert "task.allowAutomaticTasks" in result.output
+    assert "`pi` is not on PATH" not in result.output
+
+
+def test_new_prompt_preflight_warns_about_an_existing_tasks_json(tmp_path, monkeypatch):
+    """A repo with its own .vscode/tasks.json gets the merge path in the hook
+    instead of the fresh-write one; worth a heads-up since the merge edits a
+    file the repo already owns.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    (repo_dir / ".vscode").mkdir()
+    (repo_dir / ".vscode" / "tasks.json").write_text('{"version": "2.0.0", "tasks": []}')
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_prompt_preflight(monkeypatch, tmp_path)
+    _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "-p", "do a thing"])
+
+    assert result.exit_code == 0, result.output
+    assert "tasks.json" in result.output
+    assert "`pi` is not on PATH" not in result.output
+    assert "task.allowAutomaticTasks" not in result.output
+
+
 def test_list_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)

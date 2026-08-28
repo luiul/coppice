@@ -16,6 +16,7 @@ will then `cd` you into the resulting worktree.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import time
@@ -136,6 +137,36 @@ def _fail(message: str) -> typer.Exit:
     return typer.Exit(1)
 
 
+# macOS VS Code user settings, read by `new --prompt`'s preflight. The file is
+# JSONC (comments, trailing commas), so the check below is a regex heuristic,
+# not a JSON parse.
+_VSCODE_SETTINGS_PATH = Path.home() / "Library" / "Application Support" / "Code" / "User" / "settings.json"
+
+
+def _prompt_preflight(repo_root: Path) -> None:
+    """Non-blocking sanity checks for `new --prompt`: the prompt is delivered
+    by the user's `wt` hooks plus a VS Code folder-open task (see README), none
+    of which coppice controls from here, so a missing piece means the prompt
+    silently goes nowhere. Warn (dim, on stderr) rather than fail: the
+    worktree itself is created regardless.
+    """
+    if shutil.which("pi") is None:
+        err.print("[dim]note: `pi` is not on PATH, the --prompt hook needs it to start a session in the new window[/]")
+    try:
+        settings = _VSCODE_SETTINGS_PATH.read_text()
+    except OSError:
+        settings = ""
+    if not re.search(r'"task\.allowAutomaticTasks"\s*:\s*"on"', settings):
+        err.print(
+            '[dim]note: VS Code\'s "task.allowAutomaticTasks" is not "on", the --prompt task will not auto-run '
+            "until automatic tasks are allowed once (see README)[/]"
+        )
+    if (repo_root / ".vscode" / "tasks.json").is_file():
+        err.print(
+            "[dim]note: this repo already has a .vscode/tasks.json, the --prompt hook will merge its task into it[/]"
+        )
+
+
 def _plural(n: int, singular: str) -> str:
     """'1 worktree' but '2 worktrees': English pluralization for summary lines."""
     return f"{n} {singular}" if n == 1 else f"{n} {singular}s"
@@ -174,6 +205,15 @@ def cmd_new(
         bool,
         typer.Option("--yes", "-y", help="Skip the confirmation prompt when the branch already exists."),
     ] = False,
+    prompt: Annotated[
+        str | None,
+        typer.Option(
+            "--prompt",
+            "-p",
+            help="Open the worktree's VS Code window with `pi` already running this prompt in its terminal. "
+            "Delivered as $COP_PROMPT to `wt`'s hooks; needs the one-time hook + VS Code setup from the README.",
+        ),
+    ] = None,
 ) -> None:
     """Create or reuse a worktree for the repo at PATH.
 
@@ -188,6 +228,7 @@ def cmd_new(
     Examples:
         coppice new ./tardis
         coppice new . --branch fix-thing --base develop
+        coppice new . --prompt "fix the flaky login test"
     """
     try:
         repo_root = repo.resolve_repo_root(path)
@@ -234,8 +275,17 @@ def cmd_new(
     if create and base is None:
         base = repo.default_branch(repo_root)
 
+    if prompt:
+        _prompt_preflight(repo_root)
+
     try:
-        result = wt.switch(repo_root, branch, create=create, base=base)
+        result = wt.switch(
+            repo_root,
+            branch,
+            create=create,
+            base=base,
+            extra_env={"COP_PROMPT": prompt} if prompt else None,
+        )
     except (wt.WtNotFoundError, wt.WtCommandError) as exc:
         raise _fail(str(exc)) from exc
 

@@ -11,6 +11,7 @@ own config.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Iterable
@@ -40,13 +41,24 @@ def require_wt() -> str:
     return path
 
 
-def run(args: list[str], cwd: Path | None = None, check: bool = True) -> subprocess.CompletedProcess[str]:
+def run(
+    args: list[str],
+    cwd: Path | None = None,
+    check: bool = True,
+    extra_env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
     require_wt()
     cmd = ["wt"]
     if cwd is not None:
         cmd += ["-C", str(cwd)]
     cmd += args
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # env=None lets the child inherit this process's environment as-is;
+    # EXTRA_ENV is merged over a copy of it instead, so a caller can hand
+    # variables down to `wt`'s hooks (e.g. COP_PROMPT for `coppice new
+    # --prompt`, which the user's post-switch hook reads) without touching
+    # anything else.
+    env = {**os.environ, **extra_env} if extra_env is not None else None
+    proc = subprocess.run(cmd, capture_output=True, text=True, env=env)
     if check and proc.returncode != 0:
         raise WtCommandError(args, proc.returncode, proc.stderr)
     return proc
@@ -129,15 +141,20 @@ def switch(
     *,
     create: bool = False,
     base: str | None = None,
+    extra_env: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run `wt switch`, returning `{"action": "created"|"existing", "branch": ..., "path": ...}`."""
+    """Run `wt switch`, returning `{"action": "created"|"existing", "branch": ..., "path": ...}`.
+
+    EXTRA_ENV is merged over the current environment for the `wt` subprocess
+    (and thereby for its hooks); see `run`.
+    """
     args = ["switch"]
     if create:
         args.append("--create")
     if base is not None:
         args += ["--base", base]
     args += ["--no-cd", "--format", "json", branch]
-    proc = run(args, cwd=repo)
+    proc = run(args, cwd=repo, extra_env=extra_env)
     return _load_json(proc.stdout)
 
 
