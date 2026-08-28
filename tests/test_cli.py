@@ -82,18 +82,16 @@ def test_new_without_wt_fails_clearly(tmp_path, monkeypatch):
 
 
 def _stub_switch(monkeypatch, *, branch_exists: bool, remote_branch_exists: bool = False):
-    """Stub out every `wt` call `cmd_new` makes: the `_print_existing_worktrees`
-    preview it prints before ever prompting, the branch-exists checks, and
-    the switch/create call, so its confirmation-prompt logic can be tested
-    without a real `wt` install or worktree creation. Without stubbing
-    `list_worktrees` too, `_stub_wt`'s faked `shutil.which` is enough to get
-    past `require_wt()`, but `cmd_new` still shells out to a literal `wt`
-    subprocess right after, which raises `FileNotFoundError` wherever `wt`
-    genuinely isn't on PATH (e.g. CI), even though it happens to be a no-op
-    on a machine that has `wt` installed for real.
+    """Stub out every `wt` call `cmd_new` makes once the branch name is
+    decided: the branch-exists checks and the switch/create call, so its
+    confirmation-prompt logic can be tested without a real `wt` install or
+    worktree creation. The `_print_existing_worktrees` preview's
+    `list_worktrees` call deliberately gets no stub here: every test below
+    passes `--branch` (which skips the preview), so a regression that
+    reintroduces a `wt list` subprocess on that path fails loudly on a
+    `wt`-less CI instead of going unnoticed on machines with a real `wt`.
     """
     switch_calls: list[dict[str, Any]] = []
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [])
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: branch_exists)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: remote_branch_exists)
     monkeypatch.setattr(
@@ -245,7 +243,6 @@ def test_new_reports_the_resolved_base_branch_it_forked_from(tmp_path, monkeypat
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [])
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: False)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
     monkeypatch.setattr(
@@ -262,6 +259,43 @@ def test_new_reports_the_resolved_base_branch_it_forked_from(tmp_path, monkeypat
 
     assert result.exit_code == 0, result.output
     assert "from master" in result.output
+
+
+def test_new_skips_the_worktree_preview_when_branch_is_given(tmp_path, monkeypatch):
+    """The 'already in flight' preview exists to inform the interactive
+    branch-description prompt. With --branch the name is already decided, so
+    the preview's `wt list` subprocess is pure latency (scripted callers like
+    jira-worktree pass --branch on every call) and must not run at all.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    _stub_switch(monkeypatch, branch_exists=False)
+    list_calls: list[Path] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: list_calls.append(_repo) or [])
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0, result.output
+    assert list_calls == []
+
+
+def test_new_shows_the_worktree_preview_before_prompting_interactively(tmp_path, monkeypatch):
+    """Without --branch, `cmd_new` prompts for a branch description, and the
+    preview of what's already in flight must still run first, so the user can
+    avoid accidentally starting a near-duplicate of existing work.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    _stub_switch(monkeypatch, branch_exists=False)
+    list_calls: list[Path] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: list_calls.append(_repo) or [])
+
+    result = runner.invoke(app, ["new", str(repo_dir)], input="\n")
+
+    assert result.exit_code == 0, result.output
+    assert len(list_calls) == 1
 
 
 def _stub_prompt_preflight(monkeypatch, tmp_path, *, pi: bool = True, automatic_tasks: bool = True) -> None:
@@ -284,7 +318,9 @@ def test_new_prompt_sets_cop_prompt_in_the_wt_environment(tmp_path, monkeypatch)
     _stub_prompt_preflight(monkeypatch, tmp_path)
     switch_calls = _stub_switch(monkeypatch, branch_exists=False)
 
-    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--prompt", "fix the flaky login test"])
+    result = runner.invoke(
+        app, ["new", str(repo_dir), "--branch", "fresh-branch", "--prompt", "fix the flaky login test"]
+    )
 
     assert result.exit_code == 0, result.output
     assert switch_calls[0]["extra_env"] == {"COP_PROMPT": "fix the flaky login test"}
@@ -624,7 +660,9 @@ def test_clean_merged_removable_set(tmp_path, monkeypatch):
     entries = [
         _entry("behind-main", tmp_path / "behind", commit_ts=now - old_seconds, main_state="behind"),
         _entry("at-main", tmp_path / "same", commit_ts=now - old_seconds, main_state="same_commit"),
-        _entry("dirty-at-main", tmp_path / "dirty-same", commit_ts=now - old_seconds, main_state="same_commit", dirty=True),
+        _entry(
+            "dirty-at-main", tmp_path / "dirty-same", commit_ts=now - old_seconds, main_state="same_commit", dirty=True
+        ),
         _entry("diverged-branch", tmp_path / "diverged", commit_ts=now - old_seconds, main_state="diverged"),
         _entry("conflict-branch", tmp_path / "conflict", commit_ts=now - old_seconds, main_state="would_conflict"),
         _entry("main", tmp_path / "repo", is_main=True),

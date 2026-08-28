@@ -21,7 +21,6 @@ import shutil
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
-from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -80,6 +79,11 @@ class _PathShortcutGroup(TyperGroup):
 def _version_callback(show_version: bool) -> None:
     if not show_version:
         return
+    # Imported on demand, not at module top: importlib.metadata costs ~75ms
+    # of interpreter startup (its own import chain plus the distribution
+    # scan), a tax on every invocation for something only --version needs.
+    from importlib.metadata import PackageNotFoundError, version
+
     try:
         console.print(f"coppice {version('coppice')}")
     except PackageNotFoundError:
@@ -176,9 +180,13 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     """Show what's already in flight before prompting for a new branch,
     to avoid accidentally starting a near-duplicate of existing work.
 
+    Only called on the interactive path (no --branch): the preview's whole
+    purpose is informing the branch-description prompt, so with the name
+    already decided its `wt list` subprocess would be pure latency.
+
     Skips the (slow, directory-walking) size column here: this preview runs
-    on every 'coppice new' before the user's even typed a branch name, so it
-    stays fast rather than complete.
+    before the user's even typed a branch name, so it stays fast rather
+    than complete.
     """
     worktrees = wt.list_worktrees(repo_root)
     others = [w for w in worktrees if not w.get("is_main") and not w.get("is_current")]
@@ -199,7 +207,11 @@ def cmd_new(
     ] = None,
     base: Annotated[
         str | None,
-        typer.Option("--base", "-B", help="Base branch/ref to create from. Defaults to the repo's actual default branch (freshly resolved from its remote)."),
+        typer.Option(
+            "--base",
+            "-B",
+            help="Base branch/ref to create from. Defaults to the repo's actual default branch (freshly resolved from its remote).",
+        ),
     ] = None,
     yes: Annotated[
         bool,
@@ -241,9 +253,9 @@ def cmd_new(
         raise _fail(str(exc)) from exc
 
     console.print()
-    _print_existing_worktrees(repo_root)
 
     if branch is None:
+        _print_existing_worktrees(repo_root)
         description = typer.prompt(
             "Short branch description (optional, enter for a timestamp id)",
             default="",
@@ -1218,9 +1230,7 @@ def cmd_clean(
                 if seconds < threshold_seconds:
                     n_young += 1
                     if verbose:
-                        lines.append(
-                            f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](younger than {days}d)[/]"
-                        )
+                        lines.append(f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](younger than {days}d)[/]")
                     continue
 
             if _is_dirty(w):
