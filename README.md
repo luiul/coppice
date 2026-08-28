@@ -346,10 +346,11 @@ installed and on `PATH`; `coppice` shells out to it for every worktree
 operation. If it's missing, commands fail fast with a clear message. See
 [worktrunk.dev](https://worktrunk.dev) for install instructions.
 
+With the repo cloned, install it as a uv tool (editable, so local changes
+take effect immediately):
+
 ```bash
-uv tool install coppice
-# or run ad hoc, no install:
-uvx coppice ...
+uv tool install -e .
 ```
 
 Then, so `cop new` can `cd` you into the worktree it creates, add shell
