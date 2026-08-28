@@ -149,10 +149,12 @@ _VSCODE_SETTINGS_PATH = Path.home() / "Library" / "Application Support" / "Code"
 
 def _prompt_preflight(repo_root: Path) -> None:
     """Non-blocking sanity checks for `new --prompt`: the prompt is delivered
-    by the user's `wt` hooks plus a VS Code folder-open task (see README), none
-    of which coppice controls from here, so a missing piece means the prompt
-    silently goes nowhere. Warn (dim, on stderr) rather than fail: the
-    worktree itself is created regardless.
+    by the user's `wt` hooks (see README): a hook script drives the new
+    window's integrated terminal directly via the Accessibility API, with a
+    VS Code folder-open task as the fallback when the drive is unavailable.
+    None of it is controlled by coppice from here, so a missing piece can
+    mean the prompt silently goes nowhere. Warn (dim, on stderr) rather
+    than fail: the worktree itself is created regardless.
     """
     if shutil.which("pi") is None:
         err.print("[dim]note: `pi` is not on PATH, the --prompt hook needs it to start a session in the new window[/]")
@@ -162,12 +164,13 @@ def _prompt_preflight(repo_root: Path) -> None:
         settings = ""
     if not re.search(r'"task\.allowAutomaticTasks"\s*:\s*"on"', settings):
         err.print(
-            '[dim]note: VS Code\'s "task.allowAutomaticTasks" is not "on", the --prompt task will not auto-run '
-            "until automatic tasks are allowed once (see README)[/]"
+            '[dim]note: VS Code\'s "task.allowAutomaticTasks" is not "on": fine while the direct terminal '
+            "delivery works, but the --prompt fallback task will not auto-run until automatic tasks are "
+            "allowed once (see README)[/]"
         )
     if (repo_root / ".vscode" / "tasks.json").is_file():
         err.print(
-            "[dim]note: this repo already has a .vscode/tasks.json, the --prompt hook will merge its task into it[/]"
+            "[dim]note: this repo already has a .vscode/tasks.json, the --prompt fallback will merge its task into it[/]"
         )
 
 
