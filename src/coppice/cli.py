@@ -1164,9 +1164,12 @@ def cmd_clean(
     else:
         console.print(f"Scanning {_plural(len(scope), 'repo')} for worktrees older than {days}d...")
 
-    # (repo_root, branch, size_kb); size_kb is -1 for a stale/dangling entry
-    # (its directory is already gone, there's nothing to size).
-    candidates: list[tuple[Path, str, int]] = []
+    # (repo_root, display name, size_kb, prune path); size_kb is -1 for a
+    # stale/dangling entry (its directory is already gone, there's nothing
+    # to size). Prune path is set only for a branchless (detached) stale
+    # entry: there's no branch to hand to `wt remove`, so its dangling
+    # reference is pruned by path with git instead.
+    candidates: list[tuple[Path, str, int, str | None]] = []
     n_worktrees = n_young = n_dirty = n_pr = n_stale = n_unmerged = 0
 
     # Fetch every repo's worktrees concurrently (one `wt` subprocess per
@@ -1186,10 +1189,13 @@ def cmd_clean(
     pending_by_repo: dict[Path, list[tuple[int, dict[str, Any], str]]] = {}
 
     for repo_root in scope:
+        # A stale entry can be detached (`branch` is null, `list` shows it
+        # as '?'), so staleness substitutes for having a branch here: it's
+        # an unconditional removal candidate either way.
         others = [
             w
             for w in worktrees_by_repo.get(repo_root, [])
-            if not w.get("is_main") and not w.get("is_current") and w.get("branch")
+            if not w.get("is_main") and not w.get("is_current") and (w.get("branch") or _is_stale(w))
         ]
         if not others:
             continue
@@ -1198,15 +1204,35 @@ def cmd_clean(
         pending: list[tuple[int, dict[str, Any], str]] = []  # (line index, worktree, age_label)
         for w in others:
             n_worktrees += 1
-            branch_name = w["branch"]
+            branch_name = w.get("branch")
 
             if _is_stale(w):
                 n_stale += 1
-                lines.append(
-                    f"  [green]rm[/]    [red]stale[/]  {branch_name}  [dim](worktree directory is gone; "
-                    "cleaning up the dangling reference)[/]"
-                )
-                candidates.append((repo_root, branch_name, -1))
+                if branch_name:
+                    lines.append(
+                        f"  [green]rm[/]    [red]stale[/]  {branch_name}  [dim](worktree directory is gone; "
+                        "cleaning up the dangling reference)[/]"
+                    )
+                    candidates.append((repo_root, branch_name, -1, None))
+                elif path := w.get("path"):
+                    # A detached stale entry has no branch to hand to `wt
+                    # remove` (which also refuses entries whose directory is
+                    # already gone), so the path is its only identity and
+                    # the reference gets pruned by path with git directly.
+                    display = _short_path(Path(path))
+                    lines.append(
+                        f"  [green]rm[/]    [red]stale[/]  {display}  [dim](detached, worktree directory is "
+                        "gone; cleaning up the dangling reference)[/]"
+                    )
+                    candidates.append((repo_root, display, -1, path))
+                else:
+                    # No branch and no path: nothing to remove by. Can't
+                    # happen from git's worktree metadata (the path is
+                    # always recorded), but don't crash the scan on it.
+                    lines.append(
+                        "  [yellow]skip[/]  [red]stale[/]  ?  [dim](dangling reference with no branch or "
+                        "path; run 'git worktree prune' by hand)[/]"
+                    )
                 continue
 
             seconds = _age_seconds(w)
@@ -1293,7 +1319,7 @@ def cmd_clean(
                 f"  [green]rm[/]    {age_label:>5}  {branch_name}  "
                 f"[dim]({sizes.human_kb(size_kb)} on disk, {merge_label})[/]"
             )
-            candidates.append((repo_root, branch_name, size_kb))
+            candidates.append((repo_root, branch_name, size_kb, None))
 
     for repo_root in scope:
         repo_lines = lines_by_repo.get(repo_root)
@@ -1322,7 +1348,7 @@ def cmd_clean(
         console.print()
         return
 
-    total_kb = sum(size_kb for _, _, size_kb in candidates if size_kb > 0)
+    total_kb = sum(size_kb for _, _, size_kb, _ in candidates if size_kb > 0)
     if total_kb:
         console.print(f"Total reclaimable: {sizes.human_kb(total_kb)} across {_plural(len(candidates), 'worktree')}.")
 
@@ -1342,14 +1368,17 @@ def cmd_clean(
     console.print()
     n_removed = 0
     failed: list[str] = []
-    for repo_root, branch_name, size_kb in candidates:
+    for repo_root, name, size_kb, prune_path in candidates:
         label = "stale reference" if size_kb < 0 else sizes.human_kb(size_kb)
-        console.print(f"Removing '{branch_name}' @ {repo_root.name} ({label})...")
+        console.print(f"Removing '{name}' @ {repo_root.name} ({label})...")
         try:
-            wt.remove(repo_root, branch_name, yes=True, force_delete=force_delete)
+            if prune_path is not None:
+                wt.prune_stale(repo_root, prune_path)
+            else:
+                wt.remove(repo_root, name, yes=True, force_delete=force_delete)
         except (wt.WtNotFoundError, wt.WtCommandError) as exc:
             err.print(f"[red]Error:[/] {exc}")
-            failed.append(f"{branch_name} @ {repo_root.name}")
+            failed.append(f"{name} @ {repo_root.name}")
         else:
             n_removed += 1
 

@@ -158,6 +158,22 @@ def switch(
     return _load_json(proc.stdout)
 
 
+def prune_stale(repo: Path, path: str) -> None:
+    """Prune one stale (prunable) worktree reference by path.
+
+    `wt remove` can't take these: it refuses a worktree whose directory is
+    already gone ("Worktree directory missing ... run git worktree prune"),
+    and a detached stale entry has no branch name to hand it in the first
+    place. git's own `worktree remove --force` tolerates the missing
+    directory and drops exactly this one registration, unlike a repo-wide
+    `git worktree prune`.
+    """
+    args = ["worktree", "remove", "--force", path]
+    proc = subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True)
+    if proc.returncode != 0:
+        raise WtCommandError(args, proc.returncode, proc.stderr)
+
+
 def remove(repo: Path, branch: str, *, yes: bool = True, force: bool = False, force_delete: bool = False) -> None:
     args = ["remove", branch]
     if yes:

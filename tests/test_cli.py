@@ -616,6 +616,37 @@ def test_clean_nothing_to_clean(tmp_path, monkeypatch):
     assert "Nothing to clean." in result.output
 
 
+def test_clean_removes_branchless_stale_worktrees(tmp_path, monkeypatch):
+    """A stale (prunable) entry can be detached, i.e. have no branch at all
+    (`wt list` reports `"branch": null` and `list` shows it as '?'). It must
+    still be an unconditional `clean` candidate: it used to be filtered out
+    for lacking a branch before the stale check ever ran, so `clean`
+    reported 'Nothing to clean' while `list` kept nudging to run it. With
+    no branch to hand to `wt remove` (which also refuses worktrees whose
+    directory is already gone), the dangling reference is pruned by path
+    with git instead.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry(None, tmp_path / "gone", stale=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    remove_calls: list[Any] = []
+    prune_calls: list[Any] = []
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: remove_calls.append((a, k)))
+    monkeypatch.setattr(wt, "prune_stale", lambda *a, **k: prune_calls.append((a, k)))
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert "1 stale (dangling) reference(s)" in result.output
+    assert "Removed 1 worktree." in result.output
+    assert remove_calls == []
+    assert prune_calls == [((repo_dir, str(tmp_path / "gone")), {})]
+
+
 def test_clean_merged_ignores_age(tmp_path, monkeypatch):
     """--merged sweeps up every merged worktree regardless of DAYS, but still
     leaves young-but-unmerged branches alone.
