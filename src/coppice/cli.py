@@ -31,7 +31,7 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
-from coppice import gh, repo, shell, sizes, wt
+from coppice import confirm, gh, repo, shell, sizes, wt
 
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
@@ -236,9 +236,10 @@ def cmd_new(
     already exists, locally or on the remote, asks before switching to its
     worktree instead (skip with --yes/-y): 'new' implies a fresh branch, so
     an existing one, most likely a typo'd --branch meant to name a new
-    one, is the surprising case worth a check, and defaults to no on a
-    bare Enter accordingly. No prompt when it doesn't exist yet anywhere,
-    creating it is exactly what 'new' is for.
+    one, is the surprising case worth a check. The prompt is one keypress:
+    `y` switches, `n`/`esc`/enter cancel (the default is no). No prompt
+    when it doesn't exist yet anywhere, creating it is exactly what 'new'
+    is for.
 
     Examples:
         coppice new ./tardis
@@ -275,7 +276,7 @@ def cmd_new(
     create = not (wt.branch_exists(repo_root, branch) or wt.remote_branch_exists(repo_root, branch))
     if not create and not yes:
         console.print()
-        if not typer.confirm(f"Branch '{branch}' already exists. Switch to its worktree instead?", default=False):
+        if not confirm.ask(f"Switch to the '{branch}' worktree? The branch already exists."):
             console.print()
             console.print("Cancelled.")
             console.print()
@@ -1046,7 +1047,18 @@ def cmd_remove(
 
     if not yes:
         console.print()
-        if not typer.confirm(f"Remove the {_plural(len(targets), 'worktree')} listed above?", default=False):
+        # The consequence sentence names whatever the flags in play make
+        # unrecoverable: branch deletion with -D, uncommitted work with -f.
+        if force_delete:
+            consequence = "Unmerged branches are deleted too."
+        elif force:
+            consequence = "Uncommitted changes are lost."
+        else:
+            consequence = "Branches survive unless already merged."
+        if not confirm.ask(
+            f"Remove the {_plural(len(targets), 'worktree')} listed above? {consequence}",
+            tier="force" if force or force_delete else "destructive",
+        ):
             console.print()
             console.print("Cancelled.")
             console.print()
@@ -1359,7 +1371,13 @@ def cmd_clean(
 
     if not yes:
         console.print()
-        if not typer.confirm(f"Remove {_plural(len(candidates), 'worktree')} above?", default=False):
+        consequence = (
+            "Unmerged branches are deleted too." if force_delete else "Branches survive unless already merged."
+        )
+        if not confirm.ask(
+            f"Remove the {_plural(len(candidates), 'worktree')} listed above? {consequence}",
+            tier="force" if force_delete else "destructive",
+        ):
             console.print()
             console.print("Cancelled.")
             console.print()

@@ -135,6 +135,24 @@ def test_new_bare_enter_declines_the_prompt(tmp_path, monkeypatch):
     assert switch_calls == []
 
 
+def test_new_confirm_needs_no_enter(tmp_path, monkeypatch):
+    """A single `y` keypress is the whole answer, no enter: the dashkit
+    confirmation convention (CONVENTIONS.md) coppice's prompts follow. The
+    input below carries no newline; a line-based confirm would hit EOF and
+    abort instead of confirming, which is exactly the regression this
+    guards."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=True)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "existing-branch"], input="y")
+
+    assert result.exit_code == 0, result.output
+    assert len(switch_calls) == 1
+    assert switch_calls[0]["create"] is False
+
+
 def test_new_prompts_for_a_remote_only_branch_too(tmp_path, monkeypatch):
     """A branch that only exists on the remote (pushed by someone else,
     never checked out locally) must not be treated as absent: that would
@@ -801,6 +819,7 @@ def test_remove_without_yes_prompts_and_cancels_on_no(tmp_path, monkeypatch):
 
     assert result.exit_code != 0
     assert "Remove the 1 worktree listed above?" in result.output
+    assert "Branches survive unless already merged." in result.output
     assert "Cancelled." in result.output
     assert remove_calls == []
 
@@ -821,6 +840,77 @@ def test_remove_without_yes_prompts_and_proceeds_on_yes(tmp_path, monkeypatch):
     # Confirmed once at the coppice level, so `wt remove` is always told
     # `-y` too rather than relying on its own (non-functional, here) prompt.
     assert remove_calls[0][1]["yes"] is True
+
+
+def test_remove_confirm_needs_no_enter(tmp_path, monkeypatch):
+    """Same single-keypress convention as `new`'s prompt (see
+    test_new_confirm_needs_no_enter), here on a destructive one."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    remove_calls: list[Any] = []
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: remove_calls.append((a, k)))
+
+    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="y")
+
+    assert result.exit_code == 0, result.output
+    assert len(remove_calls) == 1
+
+
+def test_remove_confirm_swallows_other_keys(tmp_path, monkeypatch):
+    """Keys that mean nothing change nothing: the prompt waits them out,
+    and the EOF they leave behind cancels rather than confirming."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    remove_calls: list[Any] = []
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: remove_calls.append((a, k)))
+
+    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="xq")
+
+    assert result.exit_code != 0
+    assert "Cancelled." in result.output
+    assert remove_calls == []
+
+
+def test_remove_force_delete_prompt_warns_about_branch_deletion(tmp_path, monkeypatch):
+    """The prompt's consequence sentence names whatever the flags in play
+    make unrecoverable: with -D, unmerged branches die with the worktree."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
+
+    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir), "-D"], input="n")
+
+    assert result.exit_code != 0
+    assert "Unmerged branches are deleted too." in result.output
+    assert "Cancelled." in result.output
+
+
+def test_clean_without_yes_prompts_and_cancels(tmp_path, monkeypatch):
+    """`clean`'s bulk prompt follows the same template and key semantics as
+    `remove`'s: one keypress, enter/n/esc cancel, consequence sentence
+    included."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [_entry("old-branch", tmp_path / "old", commit_ts=now - 30 * 86400)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    remove_calls: list[Any] = []
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: remove_calls.append((a, k)))
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir)], input="n")
+
+    assert result.exit_code != 0
+    assert "Remove the 1 worktree listed above?" in result.output
+    assert "Cancelled." in result.output
+    assert remove_calls == []
 
 
 def test_remove_no_branch_falls_back_without_fzf(tmp_path, monkeypatch):

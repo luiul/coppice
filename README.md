@@ -375,7 +375,7 @@ with an open PR. Without them, those features just degrade gracefully.
 cop new ~/dbt-models                     # create branch + worktree for the repo at ~/dbt-models (or reuse it)
 cop new .                                # ...for the repo you're standing in
 cop new . --branch update-dag-schedule   # skip the prompt, use a specific branch name
-cop new . --branch update-dag-schedule --yes   # skip the "branch already exists, switch to it?" confirmation too
+cop new . --branch update-dag-schedule --yes   # skip the confirmation when the branch already exists
 cop new . -p "fix the flaky login test"  # open the worktree's VS Code window with pi already running this prompt
 cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
@@ -395,6 +395,25 @@ cop status                               # is wt on PATH, table of the shared re
 
 Run `cop --help` or `cop <command> --help` for the full option list. A
 bare `cop PATH` is shorthand for `cop new PATH`.
+
+### Confirmation prompts
+
+Every destructive (or merely surprising) action asks first, and every
+prompt behaves the same way: one keypress, no enter needed.
+
+- `y` confirms; `n`, `esc`, or `enter` cancel; any other key is ignored;
+  `ctrl+c` quits. Prompts end in `[y/N]`: the capitalized letter is the
+  default answer, so a bare enter cancels.
+- The prompt text follows one template, `<Verb> <target>? <Consequence
+  sentence>. [y/N]`, in yellow for an ordinary destructive action and red
+  when a force flag (`--force`/`--force-delete`) is in play.
+- `--yes`/`-y` skips the prompt entirely, for scripts.
+
+Same discipline as the canopy/understory dashboards (see dashkit's
+[CONVENTIONS.md](https://github.com/luiul/dashkit/blob/main/CONVENTIONS.md)),
+except the 10s auto-cancel: that exists because a dashboard's rows keep
+repolling under an open prompt, and a one-shot CLI prompt has nothing
+moving underneath it.
 
 ### How the registry works
 
