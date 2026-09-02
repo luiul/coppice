@@ -1081,7 +1081,7 @@ def test_sync_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     assert result.exit_code != 0
     assert "wt" in result.output
@@ -1097,7 +1097,7 @@ def test_sync_merges_base_into_behind_worktree(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     assert result.exit_code == 0, result.output
     assert "synced" in result.output and "feat-behind" in result.output
@@ -1107,8 +1107,10 @@ def test_sync_merges_base_into_behind_worktree(tmp_path, monkeypatch):
     assert (
         subprocess.run(["git", "-C", str(feat), "merge-base", "--is-ancestor", "origin/main", "HEAD"]).returncode == 0
     )
-    # The main worktree was fast-forwarded too.
-    assert "fast-forwarded 1 commit" in result.output
+    # The main worktree was fast-forwarded too (rolled up in the summary).
+    assert "fast-forwarded 1 main checkout" in result.output
+    # ...and the report is a list-style sectioned table.
+    assert "Worktree" in result.output and "Result" in result.output and "Detail" in result.output
     assert "day2" in (repo_dir / "f.txt").read_text()
 
 
@@ -1119,7 +1121,7 @@ def test_sync_up_to_date_worktree_is_left_alone(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-current", feat)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     assert result.exit_code == 0, result.output
     assert "Everything is already up to date." in result.output
@@ -1134,11 +1136,11 @@ def test_sync_is_idempotent_across_runs(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    first = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    first = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
     assert first.exit_code == 0, first.output
     assert "synced" in first.output
 
-    second = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    second = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
     assert second.exit_code == 0, second.output
     assert "Everything is already up to date." in second.output
     assert _merge_count(feat) == "1"  # no second merge commit appeared
@@ -1154,7 +1156,7 @@ def test_sync_skips_dirty_worktrees(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-dirty", feat, dirty=True)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     assert result.exit_code == 0, result.output
     assert "uncommitted changes" in result.output
@@ -1173,7 +1175,7 @@ def test_sync_predicts_and_skips_conflicts(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-conflict", feat)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     # A conflict is a reported outcome, not a command failure.
     assert result.exit_code == 0, result.output
@@ -1193,11 +1195,11 @@ def test_sync_dry_run_changes_nothing(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--dry-run"])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--dry-run"], env={"COLUMNS": "160"})
 
     assert result.exit_code == 0, result.output
-    assert "would merge 1 commit" in result.output
-    assert "would fast-forward" in result.output
+    assert "would sync" in result.output
+    assert "would fast-forward 1 main checkout" in result.output
     assert "Dry run, nothing changed." in result.output
     assert _merge_count(feat) == "0"
     assert "day2" not in (repo_dir / "f.txt").read_text()
@@ -1211,7 +1213,7 @@ def test_sync_no_main_leaves_the_main_worktree_alone(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--no-main"])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--no-main"], env={"COLUMNS": "160"})
 
     assert result.exit_code == 0, result.output
     assert "main worktree" not in result.output
@@ -1232,7 +1234,7 @@ def test_sync_skips_stale_and_detached_entries(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     assert result.exit_code == 0, result.output
     assert "stale" in result.output
@@ -1246,7 +1248,7 @@ def test_sync_unknown_branch_filter_fails(tmp_path, monkeypatch):
     _stub_wt(monkeypatch)
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [_entry("main", repo_dir, is_main=True)])
 
-    result = runner.invoke(app, ["sync", "nope", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "nope", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     assert result.exit_code == 1
     assert "no worktree found for: nope" in result.output
@@ -1265,7 +1267,7 @@ def test_sync_branch_filter_syncs_only_the_named_worktree(tmp_path, monkeypatch)
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "feat-a", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["sync", "feat-a", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
 
     assert result.exit_code == 0, result.output
     assert "feat-a" in result.output
@@ -1290,7 +1292,7 @@ def test_sync_repo_without_origin_is_reported_not_fatal(tmp_path, monkeypatch):
     monkeypatch.setattr(repo, "scope_repos", lambda _path: [good_dir, bad_dir])
     monkeypatch.setattr(wt, "list_worktrees", lambda r: entries[r])
 
-    result = runner.invoke(app, ["sync"])
+    result = runner.invoke(app, ["sync"], env={"COLUMNS": "160"})
 
     assert result.exit_code == 1
     assert "could not resolve the default branch" in result.output
@@ -1315,7 +1317,9 @@ def test_sync_base_override_merges_that_branch_instead(tmp_path, monkeypatch):
     entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--base", "develop", "--no-main"])
+    result = runner.invoke(
+        app, ["sync", "--repo", str(repo_dir), "--base", "develop", "--no-main"], env={"COLUMNS": "160"}
+    )
 
     assert result.exit_code == 0, result.output
     assert "origin/develop" in result.output

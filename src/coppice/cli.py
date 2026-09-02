@@ -1411,12 +1411,37 @@ def cmd_clean(
         raise typer.Exit(1)
 
 
-def _sync_line(label: str, style: str, subject: str, note: str = "") -> str:
-    """One `sync` report line: a fixed-width colored label, the subject (a
-    branch name or 'main worktree'), and an optional dim parenthetical note,
-    the same shape `clean`'s scan lines use."""
-    suffix = f"  [dim]({note})[/]" if note else ""
-    return f"  [{style}]{label:<9}[/] {subject}{suffix}"
+def _sync_row(label: str, style: str, subject: str, note: str = "") -> tuple[str, str, str]:
+    """One `sync` table row as Rich cells: the subject (a branch name or 'main
+    worktree'), the result label, and a dim detail note. A stale entry redifies
+    the subject too, the same convention `list` uses (the whole signal goes
+    bold red, see `_worktree_cells`)."""
+    if style == _STYLE_STALE:
+        subject = f"[{_STYLE_STALE}]{subject}[/]"
+    return subject, f"[{style}]{label}[/]", f"[dim]{note}[/]" if note else ""
+
+
+def _render_sync_table(sections: list[tuple[Path, str | None, list[tuple[str, str, str]]]]) -> None:
+    """`sync`'s report as one Rich table sectioned by repo, the same visual
+    language as `list` (see `_render_list`): SIMPLE_HEAVY box, bold header, a
+    repo heading row in the first column (carrying the base ref where `list`
+    carries the main branch), worktree rows indented under it, a separator
+    between repos. Each section is (repo root, base branch name or None, its
+    `_sync_row`s)."""
+    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
+    table.add_column("Worktree")
+    table.add_column("Result")
+    table.add_column("Detail")
+
+    last = len(sections) - 1
+    for i, (repo_root, base_branch, rows) in enumerate(sections):
+        heading = f"[bold]{repo_root.name}[/]"
+        if base_branch:
+            heading += f" [dim](base: origin/{base_branch})[/]"
+        table.add_row(heading, "", "")
+        for j, (subject, result, detail) in enumerate(rows):
+            table.add_row(f"  {subject}", result, detail, end_section=i < last and j == len(rows) - 1)
+    console.print(table)
 
 
 @app.command("sync", rich_help_panel="Update")
@@ -1526,15 +1551,15 @@ def cmd_sync(
         list(pool.map(_resolve_and_fetch, scope))
 
     n_synced = n_current = n_skipped = n_conflict = n_stale = n_main_ff = n_error = 0
-    lines_by_repo: dict[Path, list[str]] = {}
+    rows_by_repo: dict[Path, list[tuple[str, str, str]]] = {}
 
     for repo_root in scope:
-        lines: list[str] = []
-        lines_by_repo[repo_root] = lines
+        rows: list[tuple[str, str, str]] = []
+        rows_by_repo[repo_root] = rows
 
         if repo_root in fetch_error_by_repo:
             n_error += 1
-            lines.append(_sync_line("error", "red", "base fetch", fetch_error_by_repo[repo_root]))
+            rows.append(_sync_row("error", "red", "base fetch", fetch_error_by_repo[repo_root]))
             continue
 
         base_branch = base_by_repo[repo_root]
@@ -1550,27 +1575,27 @@ def cmd_sync(
         if not no_main and main_entry is not None and main_entry.get("path"):
             main_branch = main_entry.get("branch")
             if main_branch != base_branch:
-                lines.append(
-                    _sync_line("skip", "dim", "main worktree", f"has '{main_branch}' checked out, not {base_branch}")
+                rows.append(
+                    _sync_row("skip", "dim", "main worktree", f"has '{main_branch}' checked out, not {base_branch}")
                 )
             elif _is_dirty(main_entry):
                 n_skipped += 1
-                lines.append(_sync_line("skip", "yellow", "main worktree", "uncommitted changes"))
+                rows.append(_sync_row("skip", "yellow", "main worktree", "uncommitted changes"))
             elif git.is_ancestor(repo_root, base_ref, base_branch):
                 n_current += 1
-                lines.append(_sync_line("current", "dim", "main worktree"))
+                rows.append(_sync_row("current", "dim", "main worktree"))
             elif not git.is_ancestor(repo_root, base_branch, base_ref):
                 n_skipped += 1
-                lines.append(
-                    _sync_line("skip", "yellow", "main worktree", f"local {base_branch} has diverged from {base_ref}")
+                rows.append(
+                    _sync_row("skip", "yellow", "main worktree", f"local {base_branch} has diverged from {base_ref}")
                 )
             else:
                 n_incoming = git.commits_between(repo_root, base_branch, base_ref)
                 if dry_run:
                     n_main_ff += 1
-                    lines.append(
-                        _sync_line(
-                            "ff", "green", "main worktree", f"would fast-forward {_plural(n_incoming, 'commit')}"
+                    rows.append(
+                        _sync_row(
+                            "would ff", "green", "main worktree", f"{_plural(n_incoming, 'commit')} from {base_ref}"
                         )
                     )
                 else:
@@ -1578,15 +1603,12 @@ def cmd_sync(
                         git.ff_only(Path(main_entry["path"]), base_ref)
                     except git.GitError as exc:
                         n_error += 1
-                        lines.append(_sync_line("error", "red", "main worktree", f"fast-forward failed: {exc}"))
+                        rows.append(_sync_row("error", "red", "main worktree", f"fast-forward failed: {exc}"))
                     else:
                         n_main_ff += 1
-                        lines.append(
-                            _sync_line(
-                                "ff",
-                                "green",
-                                "main worktree",
-                                f"fast-forwarded {_plural(n_incoming, 'commit')} from {base_ref}",
+                        rows.append(
+                            _sync_row(
+                                "ff", "green", "main worktree", f"{_plural(n_incoming, 'commit')} from {base_ref}"
                             )
                         )
 
@@ -1597,49 +1619,43 @@ def cmd_sync(
 
             if _is_stale(w):
                 n_stale += 1
-                lines.append(
-                    _sync_line("stale", _STYLE_STALE, branch_name or "?", "worktree directory is gone; run 'cop clean'")
+                rows.append(
+                    _sync_row("stale", _STYLE_STALE, branch_name or "?", "worktree directory is gone; run 'cop clean'")
                 )
                 continue
             if not branch_name:
                 n_skipped += 1
-                lines.append(_sync_line("skip", "yellow", "?", "detached HEAD, no branch to merge into"))
+                rows.append(_sync_row("skip", "yellow", "?", "detached HEAD, no branch to merge into"))
                 continue
             if _is_dirty(w):
                 n_skipped += 1
-                lines.append(_sync_line("skip", "yellow", branch_name, "uncommitted changes"))
+                rows.append(_sync_row("skip", "yellow", branch_name, "uncommitted changes"))
                 continue
             if not w.get("path"):
                 n_skipped += 1
-                lines.append(_sync_line("skip", "yellow", branch_name, "no worktree path known"))
+                rows.append(_sync_row("skip", "yellow", branch_name, "no worktree path known"))
                 continue
 
             if git.is_ancestor(repo_root, base_ref, branch_name):
                 n_current += 1
-                lines.append(_sync_line("current", "dim", branch_name))
+                rows.append(_sync_row("current", "dim", branch_name))
                 continue
             try:
                 conflicted = git.merge_would_conflict(repo_root, branch_name, base_ref)
             except git.GitError as exc:
                 n_skipped += 1
-                lines.append(_sync_line("skip", "yellow", branch_name, f"cannot simulate merge: {exc}"))
+                rows.append(_sync_row("skip", "yellow", branch_name, f"cannot simulate merge: {exc}"))
                 continue
             if conflicted:
                 n_conflict += 1
-                lines.append(
-                    _sync_line(
-                        "conflict", _STYLE_CONFLICT, branch_name, f"merging {base_ref} would conflict; left untouched"
-                    )
-                )
+                rows.append(_sync_row("conflict", _STYLE_CONFLICT, branch_name, "would conflict; left untouched"))
                 continue
 
             n_incoming = git.commits_between(repo_root, branch_name, base_ref)
             if dry_run:
                 n_synced += 1
-                lines.append(
-                    _sync_line(
-                        "sync", "green", branch_name, f"would merge {_plural(n_incoming, 'commit')} from {base_ref}"
-                    )
+                rows.append(
+                    _sync_row("would sync", "green", branch_name, f"{_plural(n_incoming, 'commit')} from {base_ref}")
                 )
                 continue
             try:
@@ -1650,29 +1666,24 @@ def cmd_sync(
                 # abort so the worktree is never left half-merged.
                 git.merge_abort(Path(w["path"]))
                 n_error += 1
-                lines.append(_sync_line("error", "red", branch_name, f"merge failed, aborted: {exc}"))
+                rows.append(_sync_row("error", "red", branch_name, f"merge failed, aborted: {exc}"))
                 continue
             n_synced += 1
-            lines.append(_sync_line("synced", "green", branch_name, f"{_plural(n_incoming, 'commit')} from {base_ref}"))
+            rows.append(_sync_row("synced", "green", branch_name, f"{_plural(n_incoming, 'commit')} from {base_ref}"))
 
-    for repo_root in scope:
-        repo_lines = lines_by_repo.get(repo_root)
-        if not repo_lines:
-            continue
-        heading = _repo_header(repo_root)
-        if b := base_by_repo.get(repo_root):
-            heading += f" [dim](base: origin/{b})[/]"
-        console.print()
-        console.print(heading + ":")
-        for line in repo_lines:
-            console.print(line)
-
-    console.print()
-    if not any(lines_by_repo.values()):
+    sections = [
+        (repo_root, base_by_repo.get(repo_root), rows_by_repo[repo_root])
+        for repo_root in scope
+        if rows_by_repo.get(repo_root)
+    ]
+    if not sections:
         # e.g. --no-main with no managed worktrees anywhere in scope
         console.print("No worktrees in scope.")
         console.print()
         return
+
+    _render_sync_table(sections)
+    console.print()
 
     if n_synced == 0 and n_main_ff == 0 and not (n_skipped or n_conflict or n_error):
         console.print("Everything is already up to date.")

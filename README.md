@@ -359,13 +359,15 @@ Total reclaimable: 240M across 1 worktree.
 Dry run, nothing removed.
 
 $ cop sync
+Worktree                     Result     Detail
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+dbt-models (base: origin/main)
+  main worktree              ff         2 commits from origin/main
+  add-customer-id-column     synced     2 commits from origin/main
+  fix-ingestion-retry        conflict   would conflict; left untouched
+  debug-pipeline             skip       uncommitted changes
 
-dbt-models (~/dbt-models) (base: origin/main):
-  ff        main worktree  (fast-forwarded 4 commits from origin/main)
-  synced    add-customer-id-column  (4 commits from origin/main)
-  conflict  fix-ingestion-retry  (merging origin/main would conflict; left untouched)
-
-Synced 1 worktree, fast-forwarded 1 main checkout, 1 conflict.
+Synced 1 worktree, fast-forwarded 1 main checkout, 1 skipped, 1 conflict.
 ```
 
 ## Install
