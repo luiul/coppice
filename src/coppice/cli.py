@@ -1429,8 +1429,12 @@ def _render_sync_table(sections: list[tuple[Path, str | None, list[tuple[str, st
     between repos. Each section is (repo root, base branch name or None, its
     `_sync_row`s)."""
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
-    table.add_column("Worktree")
-    table.add_column("Result")
+    # no_wrap on the identifier columns: repo headings and branch names must
+    # never fold or ellipsize on narrow terminals (a wrapped 'repo (base: ...)'
+    # heading stops reading as a table at all). The Detail column is prose and
+    # absorbs the squeeze by wrapping instead.
+    table.add_column("Worktree", no_wrap=True)
+    table.add_column("Result", no_wrap=True)
     table.add_column("Detail")
 
     last = len(sections) - 1
