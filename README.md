@@ -289,6 +289,25 @@ conflict), or `unknown` (`wt` can't relate the branch to main). Only the
 `merged` bucket is removable via `clean --merged`; a `conflict` label is
 an invitation to merge or rebase, never to delete.
 
+### Keeping worktrees current: `cop sync`
+
+A worktree you come back to days later has fallen behind its base branch.
+`cop sync` fixes that in one pass: it fetches each repo's base remote
+(`origin/<default branch>`, resolved fresh from the remote, or `--base`),
+fast-forwards the main worktree's own checkout of the base branch when
+it's clean (`--no-main` skips that), then merges the base into every
+managed worktree. Dirty worktrees, stale references, and detached HEADs
+are skipped; worktrees whose merge *would* conflict are predicted with
+`git merge-tree` and left untouched, reported as conflicts, so a worktree
+is never left half-merged. `--dry-run` previews all of it accurately,
+since the classification is pure plumbing.
+
+Because sync merges (rather than rebases or squash-merges), the merge base
+advances with every run: each conflict is resolved exactly once, pushed
+branches never need force-pushing, and `wt`'s `main_state` moves from
+`diverged` back to `ahead` once a worktree is current. The merge commits
+collapse at landing time anyway, since `wt merge` squashes the branch.
+
 ### Branches vs. worktrees, in coppice's commands
 
 coppice identifies things by **branch name**, since that's what you
@@ -299,6 +318,7 @@ that branch's **worktree**, not the branch itself:
 |---|---|---|
 | `cop new PATH [--branch B] [--base REF] [--prompt TXT]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache), plus a worktree checked out onto it; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y`. With `--prompt`, opens the worktree's VS Code window with `pi` already running `TXT` (setup in [`cop new --prompt`](#cop-new---prompt-start-pi-in-the-new-window)) |
 | `cop list [PATH]` | nothing, or a repo path | lists worktrees, one per checked-out branch, **not** every branch in the repo, and **not** the main worktree (see [Concepts](#concepts)) |
+| `cop sync [BRANCH...]` | nothing, or branch **names** | merges the repo's base remote into each branch's worktree (all of them by default), keeping long-lived worktrees current |
 | `cop remove BRANCH...` | one or more branch **names** | deletes each branch's worktree directory; the branch itself survives unless it's merged or `-D`/`--force-delete` is passed |
 | `cop clean` | filters (age or `--merged`) | the bulk version of `remove`: same branch-vs-worktree distinction applies |
 
@@ -337,6 +357,15 @@ airflow-dags (~/airflow-dags):
 Scanned 2 repos, 5 worktrees: 1 removable, 0 dirty, 0 with an open PR, 4 under 14d old.
 Total reclaimable: 240M across 1 worktree.
 Dry run, nothing removed.
+
+$ cop sync
+
+dbt-models (~/dbt-models) (base: origin/main):
+  ff        main worktree  (fast-forwarded 4 commits from origin/main)
+  synced    add-customer-id-column  (4 commits from origin/main)
+  conflict  fix-ingestion-retry  (merging origin/main would conflict; left untouched)
+
+Synced 1 worktree, fast-forwarded 1 main checkout, 1 conflict.
 ```
 
 ## Install
@@ -377,6 +406,11 @@ cop new .                                # ...for the repo you're standing in
 cop new . --branch update-dag-schedule   # skip the prompt, use a specific branch name
 cop new . --branch update-dag-schedule --yes   # skip the confirmation when the branch already exists
 cop new . -p "fix the flaky login test"  # open the worktree's VS Code window with pi already running this prompt
+cop sync                                 # fetch each repo's base remote and merge it into every worktree
+cop sync --dry-run                       # preview what would be merged, changing nothing
+cop sync feat-a feat-b                   # ...just these branches' worktrees
+cop sync --repo ~/dbt-models             # ...scoped to one repo
+cop sync --no-main                       # leave the main worktree's own checkout of the base branch alone
 cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
 cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)

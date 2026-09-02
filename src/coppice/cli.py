@@ -31,7 +31,7 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
-from coppice import confirm, gh, repo, shell, sizes, wt
+from coppice import confirm, gh, git, repo, shell, sizes, wt
 
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
@@ -1408,6 +1408,296 @@ def cmd_clean(
         err.print(f"[red]Removed {_plural(n_removed, 'worktree')}, {len(failed)} failed:[/]")
         for f in failed:
             err.print(f"  - {f}")
+        raise typer.Exit(1)
+
+
+def _sync_line(label: str, style: str, subject: str, note: str = "") -> str:
+    """One `sync` report line: a fixed-width colored label, the subject (a
+    branch name or 'main worktree'), and an optional dim parenthetical note,
+    the same shape `clean`'s scan lines use."""
+    suffix = f"  [dim]({note})[/]" if note else ""
+    return f"  [{style}]{label:<9}[/] {subject}{suffix}"
+
+
+@app.command("sync", rich_help_panel="Update")
+def cmd_sync(
+    branches: Annotated[
+        list[str] | None,
+        typer.Argument(help="Only sync these branches' worktrees. Omit to sync every managed worktree in scope."),
+    ] = None,
+    repo_path: Annotated[
+        str | None,
+        typer.Option(
+            "--repo",
+            "-C",
+            help="Scope to this repo. Defaults to every known repo plus the repo you're standing in.",
+        ),
+    ] = None,
+    base: Annotated[
+        str | None,
+        typer.Option(
+            "--base",
+            "-B",
+            help="Base branch to sync from (fetched as origin/BASE). Defaults to the repo's actual default branch, "
+            "freshly resolved from its remote.",
+        ),
+    ] = None,
+    no_main: Annotated[
+        bool,
+        typer.Option("--no-main", help="Leave the main worktree's own checkout of the base branch alone."),
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", "-n", help="Report what would be synced without changing anything.")
+    ] = False,
+) -> None:
+    """Merge each repo's base remote into its worktrees, keeping long-lived ones current.
+
+    Fetches origin/<base> once per repo (BASE defaults to the repo's actual
+    default branch, freshly resolved from its remote), fast-forwards the
+    main worktree's checkout of the base branch when clean (--no-main
+    skips), then merges origin/<base> into every eligible worktree branch.
+
+    Skips dirty worktrees, stale (dangling) references, and detached HEADs.
+    Worktrees whose merge would conflict are predicted with `git merge-tree`
+    and left untouched, reported as conflicts, so a worktree is never left
+    half-merged. Never prompts: syncing only adds merge commits to clean
+    branches, and conflicts are skipped rather than forced.
+
+    Examples:
+        coppice sync                        # every worktree in every known repo
+        coppice sync --repo ~/dbt-models    # ...just this one
+        coppice sync feat-a feat-b          # ...just these branches' worktrees
+        coppice sync --dry-run              # preview, changing nothing
+    """
+    try:
+        scope = repo.scope_repos(repo_path)
+    except repo.RepoResolutionError as exc:
+        raise _fail(str(exc)) from exc
+
+    if not scope:
+        raise _fail("no known repos. Run 'coppice new' at least once, or pass --repo.")
+
+    try:
+        wt.require_wt()
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+
+    worktrees_by_repo = wt.list_worktrees_many(scope)
+
+    # An explicit BRANCH filter must name real managed worktrees; a typo'd
+    # name failing the whole run is safe (sync is idempotent, just re-run).
+    if branches:
+        known = {
+            w["branch"]
+            for worktrees in worktrees_by_repo.values()
+            for w in worktrees
+            if not w.get("is_main") and w.get("branch")
+        }
+        unmatched = [b for b in branches if b not in known]
+        if unmatched:
+            raise _fail(f"no worktree found for: {', '.join(unmatched)}")
+
+    console.print()
+
+    # Resolve each repo's base branch and fetch it, concurrently across
+    # repos: both can hit the network (default_branch's ls-remote fallback,
+    # the fetch itself), so serializing them repo-by-repo would multiply the
+    # wait. A repo whose base can't be resolved or fetched is reported and
+    # skipped, never fatal to the others.
+    base_by_repo: dict[Path, str] = {}
+    fetch_error_by_repo: dict[Path, str] = {}
+
+    def _resolve_and_fetch(repo_root: Path) -> None:
+        resolved = base or repo.default_branch(repo_root)
+        if resolved is None:
+            fetch_error_by_repo[repo_root] = "could not resolve the default branch; no origin remote?"
+            return
+        try:
+            git.fetch_base(repo_root, resolved)
+        except git.GitError as exc:
+            fetch_error_by_repo[repo_root] = str(exc)
+        else:
+            base_by_repo[repo_root] = resolved
+
+    with (
+        console.status("[dim]Fetching base branches…[/dim]"),
+        ThreadPoolExecutor(max_workers=min(len(scope), 8)) as pool,
+    ):
+        list(pool.map(_resolve_and_fetch, scope))
+
+    n_synced = n_current = n_skipped = n_conflict = n_stale = n_main_ff = n_error = 0
+    lines_by_repo: dict[Path, list[str]] = {}
+
+    for repo_root in scope:
+        lines: list[str] = []
+        lines_by_repo[repo_root] = lines
+
+        if repo_root in fetch_error_by_repo:
+            n_error += 1
+            lines.append(_sync_line("error", "red", "base fetch", fetch_error_by_repo[repo_root]))
+            continue
+
+        base_branch = base_by_repo[repo_root]
+        base_ref = f"origin/{base_branch}"
+        worktrees = worktrees_by_repo.get(repo_root, [])
+        main_entry = next((w for w in worktrees if w.get("is_main")), None)
+        others = [w for w in worktrees if not w.get("is_main")]
+
+        # The main worktree isn't merged into (it isn't a managed worktree,
+        # it's the repo itself); its checkout of the base branch is
+        # fast-forwarded instead, so the local base keeps up with the remote
+        # everything else here merges from.
+        if not no_main and main_entry is not None and main_entry.get("path"):
+            main_branch = main_entry.get("branch")
+            if main_branch != base_branch:
+                lines.append(
+                    _sync_line("skip", "dim", "main worktree", f"has '{main_branch}' checked out, not {base_branch}")
+                )
+            elif _is_dirty(main_entry):
+                n_skipped += 1
+                lines.append(_sync_line("skip", "yellow", "main worktree", "uncommitted changes"))
+            elif git.is_ancestor(repo_root, base_ref, base_branch):
+                n_current += 1
+                lines.append(_sync_line("current", "dim", "main worktree"))
+            elif not git.is_ancestor(repo_root, base_branch, base_ref):
+                n_skipped += 1
+                lines.append(
+                    _sync_line("skip", "yellow", "main worktree", f"local {base_branch} has diverged from {base_ref}")
+                )
+            else:
+                n_incoming = git.commits_between(repo_root, base_branch, base_ref)
+                if dry_run:
+                    n_main_ff += 1
+                    lines.append(
+                        _sync_line(
+                            "ff", "green", "main worktree", f"would fast-forward {_plural(n_incoming, 'commit')}"
+                        )
+                    )
+                else:
+                    try:
+                        git.ff_only(Path(main_entry["path"]), base_ref)
+                    except git.GitError as exc:
+                        n_error += 1
+                        lines.append(_sync_line("error", "red", "main worktree", f"fast-forward failed: {exc}"))
+                    else:
+                        n_main_ff += 1
+                        lines.append(
+                            _sync_line(
+                                "ff",
+                                "green",
+                                "main worktree",
+                                f"fast-forwarded {_plural(n_incoming, 'commit')} from {base_ref}",
+                            )
+                        )
+
+        for w in others:
+            branch_name = w.get("branch")
+            if branches and branch_name not in branches:
+                continue
+
+            if _is_stale(w):
+                n_stale += 1
+                lines.append(
+                    _sync_line("stale", _STYLE_STALE, branch_name or "?", "worktree directory is gone; run 'cop clean'")
+                )
+                continue
+            if not branch_name:
+                n_skipped += 1
+                lines.append(_sync_line("skip", "yellow", "?", "detached HEAD, no branch to merge into"))
+                continue
+            if _is_dirty(w):
+                n_skipped += 1
+                lines.append(_sync_line("skip", "yellow", branch_name, "uncommitted changes"))
+                continue
+            if not w.get("path"):
+                n_skipped += 1
+                lines.append(_sync_line("skip", "yellow", branch_name, "no worktree path known"))
+                continue
+
+            if git.is_ancestor(repo_root, base_ref, branch_name):
+                n_current += 1
+                lines.append(_sync_line("current", "dim", branch_name))
+                continue
+            try:
+                conflicted = git.merge_would_conflict(repo_root, branch_name, base_ref)
+            except git.GitError as exc:
+                n_skipped += 1
+                lines.append(_sync_line("skip", "yellow", branch_name, f"cannot simulate merge: {exc}"))
+                continue
+            if conflicted:
+                n_conflict += 1
+                lines.append(
+                    _sync_line(
+                        "conflict", _STYLE_CONFLICT, branch_name, f"merging {base_ref} would conflict; left untouched"
+                    )
+                )
+                continue
+
+            n_incoming = git.commits_between(repo_root, branch_name, base_ref)
+            if dry_run:
+                n_synced += 1
+                lines.append(
+                    _sync_line(
+                        "sync", "green", branch_name, f"would merge {_plural(n_incoming, 'commit')} from {base_ref}"
+                    )
+                )
+                continue
+            try:
+                git.merge(Path(w["path"]), base_ref)
+            except git.GitError as exc:
+                # The simulation said clean but the merge still failed (the
+                # tree changed between the two, a hook interfered, ...):
+                # abort so the worktree is never left half-merged.
+                git.merge_abort(Path(w["path"]))
+                n_error += 1
+                lines.append(_sync_line("error", "red", branch_name, f"merge failed, aborted: {exc}"))
+                continue
+            n_synced += 1
+            lines.append(_sync_line("synced", "green", branch_name, f"{_plural(n_incoming, 'commit')} from {base_ref}"))
+
+    for repo_root in scope:
+        repo_lines = lines_by_repo.get(repo_root)
+        if not repo_lines:
+            continue
+        heading = _repo_header(repo_root)
+        if b := base_by_repo.get(repo_root):
+            heading += f" [dim](base: origin/{b})[/]"
+        console.print()
+        console.print(heading + ":")
+        for line in repo_lines:
+            console.print(line)
+
+    console.print()
+    if not any(lines_by_repo.values()):
+        # e.g. --no-main with no managed worktrees anywhere in scope
+        console.print("No worktrees in scope.")
+        console.print()
+        return
+
+    if n_synced == 0 and n_main_ff == 0 and not (n_skipped or n_conflict or n_error):
+        console.print("Everything is already up to date.")
+    else:
+        verb = "Would sync" if dry_run else "Synced"
+        summary = f"{verb} {_plural(n_synced, 'worktree')}"
+        if n_main_ff:
+            ff_verb = "would fast-forward" if dry_run else "fast-forwarded"
+            summary += f", {ff_verb} {_plural(n_main_ff, 'main checkout')}"
+        if n_current:
+            summary += f", {n_current} already current"
+        if n_skipped:
+            summary += f", {n_skipped} skipped"
+        if n_conflict:
+            summary += f", [{_STYLE_CONFLICT}]{_plural(n_conflict, 'conflict')}[/]"
+        if n_error:
+            summary += f", [red]{_plural(n_error, 'error')}[/]"
+        console.print(summary + ".")
+    if n_stale:
+        console.print(f"[red]{n_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove.")
+    if dry_run:
+        console.print("Dry run, nothing changed.")
+    console.print()
+
+    if n_error:
         raise typer.Exit(1)
 
 

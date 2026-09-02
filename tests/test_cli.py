@@ -1015,3 +1015,308 @@ def test_status_prunes_missing_repos_from_registry(tmp_path, monkeypatch):
     assert "Pruned 1 missing repo" in flat_output
     assert "across 1 repo" in flat_output  # only the live repo counted, not the pruned one
     assert repo.known_repos() == [repo_dir]
+
+
+# --- sync -------------------------------------------------------------------
+#
+# Unlike the other commands' tests, sync's git layer (fetch, merge-tree,
+# merge) runs for real against repos in tmp_path, with a local bare repo
+# playing 'origin' (no network). Only `wt list` is stubbed, via the usual
+# `wt.list_worktrees` monkeypatch, with entries pointing at real worktree
+# directories created with plain `git worktree add`.
+
+
+def _git(cwd: Path, *args: str) -> str:
+    return subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True, check=True).stdout.strip()
+
+
+def _init_repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
+    """A repo cloned from a local bare 'origin', so sync's fetch and default
+    branch resolution run for real. Returns (repo, origin)."""
+    seed = _init_repo(tmp_path / "seed")
+    (seed / "f.txt").write_text("base\n")
+    _git(seed, "add", ".")
+    _git(seed, "commit", "-qm", "base file")
+    origin = tmp_path / "origin.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True)
+    repo_dir = tmp_path / "repo"
+    subprocess.run(["git", "clone", "-q", str(origin), str(repo_dir)], check=True)
+    _git(repo_dir, "config", "user.email", "test@example.com")
+    _git(repo_dir, "config", "user.name", "Test")
+    return repo_dir, origin
+
+
+def _advance_origin(origin: Path, tmp_path: Path, *, filename: str = "f.txt", content: str = "day2") -> None:
+    """Push one new commit to origin's main from a scratch clone, simulating
+    the base branch moving while worktrees are being worked on."""
+    other = tmp_path / "other"
+    if not other.exists():
+        subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+        _git(other, "config", "user.email", "test@example.com")
+        _git(other, "config", "user.name", "Test")
+    with open(other / filename, "a") as f:
+        f.write(content + "\n")
+    _git(other, "add", ".")
+    _git(other, "commit", "-qm", f"advance {filename}")
+    _git(other, "push", "-q")
+
+
+def _add_worktree(repo_dir: Path, path: Path, branch: str, *, with_commit: bool = True) -> Path:
+    """A real worktree on a new branch, optionally with one commit of its own
+    (a branch with no unique commits reads as already-integrated to git, which
+    is not the state these tests exercise)."""
+    subprocess.run(["git", "-C", str(repo_dir), "worktree", "add", "-q", "-b", branch, str(path)], check=True)
+    if with_commit:
+        (path / f"{branch}.txt").write_text(f"{branch} work\n")
+        _git(path, "add", ".")
+        _git(path, "commit", "-qm", f"{branch} work")
+    return path
+
+
+def _merge_count(path: Path) -> str:
+    return _git(path, "rev-list", "--count", "--merges", "HEAD")
+
+
+def test_sync_without_wt_fails_clearly(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _hide_wt(monkeypatch)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+
+    assert result.exit_code != 0
+    assert "wt" in result.output
+    assert "worktrunk.dev" in result.output
+    assert "Traceback" not in result.output
+
+
+def test_sync_merges_base_into_behind_worktree(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-behind")
+    _advance_origin(origin, tmp_path)
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "synced" in result.output and "feat-behind" in result.output
+    assert "1 commit from origin/main" in result.output
+    # Exactly one merge commit, and origin/main is now an ancestor.
+    assert _merge_count(feat) == "1"
+    assert (
+        subprocess.run(["git", "-C", str(feat), "merge-base", "--is-ancestor", "origin/main", "HEAD"]).returncode == 0
+    )
+    # The main worktree was fast-forwarded too.
+    assert "fast-forwarded 1 commit" in result.output
+    assert "day2" in (repo_dir / "f.txt").read_text()
+
+
+def test_sync_up_to_date_worktree_is_left_alone(tmp_path, monkeypatch):
+    repo_dir, _origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-current")
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-current", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "Everything is already up to date." in result.output
+    assert _merge_count(feat) == "0"
+
+
+def test_sync_is_idempotent_across_runs(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-behind")
+    _advance_origin(origin, tmp_path)
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    first = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    assert first.exit_code == 0, first.output
+    assert "synced" in first.output
+
+    second = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+    assert second.exit_code == 0, second.output
+    assert "Everything is already up to date." in second.output
+    assert _merge_count(feat) == "1"  # no second merge commit appeared
+
+
+def test_sync_skips_dirty_worktrees(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-dirty")
+    _advance_origin(origin, tmp_path)
+    # Dirtiness comes from wt's data, so the stub decides (the real worktree
+    # staying clean is what lets the merge assertions below mean anything).
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-dirty", feat, dirty=True)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "uncommitted changes" in result.output
+    assert _merge_count(feat) == "0"
+
+
+def test_sync_predicts_and_skips_conflicts(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-conflict", with_commit=False)
+    (feat / "c.txt").write_text("ours\n")
+    _git(feat, "add", ".")
+    _git(feat, "commit", "-qm", "feat c")
+    # origin/main adds the same file with different content (add/add conflict).
+    _advance_origin(origin, tmp_path, filename="c.txt", content="theirs")
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-conflict", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+
+    # A conflict is a reported outcome, not a command failure.
+    assert result.exit_code == 0, result.output
+    assert "conflict" in result.output and "left untouched" in result.output
+    assert "1 conflict" in result.output
+    # The worktree is exactly as it was: clean, no merge in progress.
+    assert _git(feat, "status", "--porcelain") == ""
+    assert subprocess.run(["git", "-C", str(feat), "rev-parse", "-q", "--verify", "MERGE_HEAD"]).returncode != 0
+    assert (feat / "c.txt").read_text() == "ours\n"
+
+
+def test_sync_dry_run_changes_nothing(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-behind")
+    _advance_origin(origin, tmp_path)
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "would merge 1 commit" in result.output
+    assert "would fast-forward" in result.output
+    assert "Dry run, nothing changed." in result.output
+    assert _merge_count(feat) == "0"
+    assert "day2" not in (repo_dir / "f.txt").read_text()
+
+
+def test_sync_no_main_leaves_the_main_worktree_alone(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-behind")
+    _advance_origin(origin, tmp_path)
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--no-main"])
+
+    assert result.exit_code == 0, result.output
+    assert "main worktree" not in result.output
+    assert "day2" not in (repo_dir / "f.txt").read_text()
+    # ...while the managed worktree still synced.
+    assert "synced" in result.output
+    assert _merge_count(feat) == "1"
+
+
+def test_sync_skips_stale_and_detached_entries(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    _advance_origin(origin, tmp_path)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("stale-branch", tmp_path / "gone", stale=True),
+        _entry(None, tmp_path / "detached"),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "stale" in result.output
+    assert "detached HEAD" in result.output
+    assert "1 stale (dangling) reference(s)" in result.output
+    assert "cop clean" in result.output
+
+
+def test_sync_unknown_branch_filter_fails(tmp_path, monkeypatch):
+    repo_dir, _origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [_entry("main", repo_dir, is_main=True)])
+
+    result = runner.invoke(app, ["sync", "nope", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 1
+    assert "no worktree found for: nope" in result.output
+
+
+def test_sync_branch_filter_syncs_only_the_named_worktree(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat_a = _add_worktree(repo_dir, tmp_path / "a", "feat-a")
+    feat_b = _add_worktree(repo_dir, tmp_path / "b", "feat-b")
+    _advance_origin(origin, tmp_path)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feat-a", feat_a),
+        _entry("feat-b", feat_b),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "feat-a", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "feat-a" in result.output
+    assert "feat-b" not in result.output
+    assert _merge_count(feat_a) == "1"
+    assert _merge_count(feat_b) == "0"
+
+
+def test_sync_repo_without_origin_is_reported_not_fatal(tmp_path, monkeypatch):
+    """A repo with no origin remote can't resolve a base branch; that's a
+    reported per-repo error (exit 1), never a traceback, and it must not take
+    the other repos in scope down with it."""
+    good_dir, origin = _init_repo_with_origin(tmp_path / "good")
+    bad_dir = _init_repo(tmp_path / "bad" / "repo")
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(good_dir, tmp_path / "good" / "feat", "feat-behind")
+    _advance_origin(origin, tmp_path / "good")
+    entries = {
+        good_dir: [_entry("main", good_dir, is_main=True), _entry("feat-behind", feat)],
+        bad_dir: [_entry("main", bad_dir, is_main=True)],
+    }
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [good_dir, bad_dir])
+    monkeypatch.setattr(wt, "list_worktrees", lambda r: entries[r])
+
+    result = runner.invoke(app, ["sync"])
+
+    assert result.exit_code == 1
+    assert "could not resolve the default branch" in result.output
+    assert "synced" in result.output
+    assert _merge_count(feat) == "1"
+
+
+def test_sync_base_override_merges_that_branch_instead(tmp_path, monkeypatch):
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    # A 'develop' branch on origin, ahead of main.
+    other = tmp_path / "other"
+    subprocess.run(["git", "clone", "-q", str(origin), str(other)], check=True)
+    _git(other, "config", "user.email", "test@example.com")
+    _git(other, "config", "user.name", "Test")
+    _git(other, "switch", "-qC", "develop")
+    (other / "dev.txt").write_text("develop work\n")
+    _git(other, "add", ".")
+    _git(other, "commit", "-qm", "develop work")
+    _git(other, "push", "-q", "-u", "origin", "develop")
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-behind")
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-behind", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--base", "develop", "--no-main"])
+
+    assert result.exit_code == 0, result.output
+    assert "origin/develop" in result.output
+    assert (feat / "dev.txt").read_text() == "develop work\n"
