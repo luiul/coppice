@@ -31,7 +31,7 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
-from coppice import confirm, gh, git, repo, shell, sizes, wt
+from coppice import confirm, gh, git, repo, shell, sizes, vscode, wt
 
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
@@ -905,6 +905,38 @@ def cmd_list(
     console.print()
 
 
+def _open_vscode_windows(worktrees: dict[tuple[Path, str], Path]) -> set[tuple[Path, str]]:
+    """Which WORKTREES ((repo_root, branch) -> worktree path) currently have
+    a VS Code window open on their worktree, for a confirmation prompt's
+    warning.
+
+    One osascript round-trip for the whole batch. Best-effort: an empty
+    mapping short-circuits, and a failed window listing (see
+    vscode.open_window_titles) answers empty, so the prompt stays silent
+    rather than ever claiming "not open".
+    """
+    if not worktrees:
+        return set()
+    titles = vscode.open_window_titles()
+    if not titles:
+        return set()
+    return {
+        key
+        for key, path in worktrees.items()
+        if any(vscode.title_matches_worktree(title, path, key[1]) for title in titles)
+    }
+
+
+# Marker appended to a confirmation listing's line when that worktree has
+# a VS Code window open on it, plus the note that follows such a listing.
+# Wording shared by `remove` and `clean`.
+_VSCODE_OPEN_MARKER = "  [yellow](VS Code window open)[/]"
+_VSCODE_OPEN_NOTE = (
+    "Close the marked windows first: removing a worktree out from under a "
+    "VS Code window that has it open strands the window on a deleted folder."
+)
+
+
 def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[dict[str, Any]]]) -> list[str] | None:
     """fzf multi-select picker over every removable worktree in SCOPE, for
     `coppice remove` with no BRANCH given.
@@ -1042,8 +1074,19 @@ def cmd_remove(
 
     console.print()
     console.print(f"About to remove {_plural(len(targets), 'worktree')}:")
+    open_windows = _open_vscode_windows(
+        {
+            (repo_root, branch_name): Path(w["path"])
+            for repo_root, branch_name in targets
+            for w in removable[repo_root]
+            if w["branch"] == branch_name and w.get("path")
+        }
+    )
     for target, branch_name in targets:
-        console.print(f"  {branch_name} @ {target.name}")
+        marker = _VSCODE_OPEN_MARKER if (target, branch_name) in open_windows else ""
+        console.print(f"  {branch_name} @ {target.name}{marker}")
+    if open_windows:
+        console.print(f"[yellow]{_VSCODE_OPEN_NOTE}[/]")
 
     if not yes:
         console.print()
@@ -1321,15 +1364,28 @@ def cmd_clean(
 
     size_cache = sizes.dir_sizes_kb(all_kept_paths) if all_kept_paths else {}
 
+    # One osascript round-trip for every candidate at once; empty when the
+    # windows can't be listed, in which case nothing is marked rather than
+    # ever claiming "not open".
+    open_windows = _open_vscode_windows(
+        {
+            (repo_root, w["branch"]): Path(w["path"])
+            for repo_root, kept in kept_by_repo.items()
+            for _, w, _ in kept
+            if w.get("path")
+        }
+    )
+
     for repo_root, kept in kept_by_repo.items():
         lines = lines_by_repo[repo_root]
         for idx, w, age_label in kept:
             branch_name = w["branch"]
             size_kb = size_cache.get(Path(w["path"]), 0) if w.get("path") else 0
             merge_label = _merge_label(w, force_delete=force_delete)
+            marker = _VSCODE_OPEN_MARKER if (repo_root, branch_name) in open_windows else ""
             lines[idx] = (
                 f"  [green]rm[/]    {age_label:>5}  {branch_name}  "
-                f"[dim]({sizes.human_kb(size_kb)} on disk, {merge_label})[/]"
+                f"[dim]({sizes.human_kb(size_kb)} on disk, {merge_label})[/]{marker}"
             )
             candidates.append((repo_root, branch_name, size_kb, None))
 
@@ -1354,6 +1410,9 @@ def cmd_clean(
             f"Scanned {_plural(len(scope), 'repo')}, {_plural(n_worktrees, 'worktree')}: {len(candidates)} removable, "
             f"{n_dirty} dirty, {n_pr} with an open PR, {n_young} under {days}d old{stale_note}."
         )
+
+    if open_windows:
+        console.print(f"[yellow]{_VSCODE_OPEN_NOTE}[/]")
 
     if not candidates:
         console.print("Nothing to clean.")

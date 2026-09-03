@@ -15,7 +15,7 @@ from typing import Any
 
 from typer.testing import CliRunner
 
-from coppice import cli, gh, repo, wt
+from coppice import cli, gh, repo, vscode, wt
 from coppice.cli import app
 
 runner = CliRunner()
@@ -619,6 +619,28 @@ def test_clean_dry_run_categorizes_candidates(tmp_path, monkeypatch):
     assert "4 removable" in result.output
 
 
+def test_clean_marks_candidates_with_an_open_vscode_window(tmp_path, monkeypatch):
+    """`clean` deletes worktree directories in batch, so its listing gets
+    the same marker + note as `remove` when a window has a candidate open."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [
+        _entry("mergeable-branch", tmp_path / "mergeable", commit_ts=now - 30 * 86400, main_state="integrated"),
+        _entry("main", tmp_path / "repo", is_main=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(vscode, "open_window_titles", lambda: ["mergeable — mergeable-branch"])
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "mergeable-branch" in result.output and "(VS Code window open)" in result.output
+    assert "Close the marked windows first" in result.output
+
+
 def test_clean_nothing_to_clean(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
@@ -840,6 +862,38 @@ def test_remove_without_yes_prompts_and_proceeds_on_yes(tmp_path, monkeypatch):
     # Confirmed once at the coppice level, so `wt remove` is always told
     # `-y` too rather than relying on its own (non-functional, here) prompt.
     assert remove_calls[0][1]["yes"] is True
+
+
+def test_remove_marks_a_target_with_an_open_vscode_window(tmp_path, monkeypatch):
+    """A worktree a VS Code window has open gets marked in remove's
+    confirmation listing, with the close-it-first note: deleting the
+    directory out from under the window strands it."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(vscode, "open_window_titles", lambda: ["good — good-branch — x.py"])
+
+    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
+
+    assert "(VS Code window open)" in result.output
+    assert "Close the marked windows first" in result.output
+
+
+def test_remove_stays_silent_when_windows_cannot_be_listed(tmp_path, monkeypatch):
+    """A failed window listing is 'can't tell': no marker, no note, rather
+    than a claim of 'not open'."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
+    monkeypatch.setattr(vscode, "open_window_titles", lambda: None)
+
+    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
+
+    assert "VS Code window open" not in result.output
 
 
 def test_remove_confirm_needs_no_enter(tmp_path, monkeypatch):

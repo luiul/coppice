@@ -444,6 +444,13 @@ prompt behaves the same way: one keypress, no enter needed.
   sentence>. [y/N]`, in yellow for an ordinary destructive action and red
   when a force flag (`--force`/`--force-delete`) is in play.
 - `--yes`/`-y` skips the prompt entirely, for scripts.
+- When a worktree about to be removed has a VS Code window open on it,
+  `remove` and `clean` mark its line with `(VS Code window open)` and
+  suggest closing it first: deleting the directory out from under the
+  window strands it. Detection is one read-only osascript window listing
+  matched by the ecosystem's `window.title` convention (same rule as
+  mycelium's), and a failed listing stays silent rather than ever
+  claiming "not open".
 
 Same discipline as the canopy/understory dashboards (see dashkit's
 [CONVENTIONS.md](https://github.com/luiul/dashkit/blob/main/CONVENTIONS.md)),
