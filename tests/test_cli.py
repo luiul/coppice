@@ -1276,12 +1276,38 @@ def test_sync_branch_filter_syncs_only_the_named_worktree(tmp_path, monkeypatch)
     assert _merge_count(feat_b) == "0"
 
 
-def test_sync_repo_without_origin_is_reported_not_fatal(tmp_path, monkeypatch):
-    """A repo with no origin remote can't resolve a base branch; that's a
-    reported per-repo error (exit 1), never a traceback, and it must not take
-    the other repos in scope down with it."""
+def test_sync_repo_without_origin_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """A repo with no origin remote has nothing to sync from; that's a
+    reported per-repo skip (exit 0), never a traceback or an error, and it
+    must not take the other repos in scope down with it."""
     good_dir, origin = _init_repo_with_origin(tmp_path / "good")
     bad_dir = _init_repo(tmp_path / "bad" / "repo")
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(good_dir, tmp_path / "good" / "feat", "feat-behind")
+    _advance_origin(origin, tmp_path / "good")
+    entries = {
+        good_dir: [_entry("main", good_dir, is_main=True), _entry("feat-behind", feat)],
+        bad_dir: [_entry("main", bad_dir, is_main=True)],
+    }
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [good_dir, bad_dir])
+    monkeypatch.setattr(wt, "list_worktrees", lambda r: entries[r])
+
+    result = runner.invoke(app, ["sync"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    assert "no origin remote" in result.output
+    assert "synced" in result.output
+    assert _merge_count(feat) == "1"
+
+
+def test_sync_repo_with_unreachable_origin_is_an_error(tmp_path, monkeypatch):
+    """An origin remote that exists but can't be reached (with no cached
+    origin/HEAD to fall back on) leaves the base branch unresolvable: a
+    reported per-repo error (exit 1), while the other repos in scope still
+    sync."""
+    good_dir, origin = _init_repo_with_origin(tmp_path / "good")
+    bad_dir = _init_repo(tmp_path / "bad" / "repo")
+    _git(bad_dir, "remote", "add", "origin", str(tmp_path / "nonexistent"))
     _stub_wt(monkeypatch)
     feat = _add_worktree(good_dir, tmp_path / "good" / "feat", "feat-behind")
     _advance_origin(origin, tmp_path / "good")

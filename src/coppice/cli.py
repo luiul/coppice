@@ -1535,11 +1535,17 @@ def cmd_sync(
     # skipped, never fatal to the others.
     base_by_repo: dict[Path, str] = {}
     fetch_error_by_repo: dict[Path, str] = {}
+    no_remote_repos: set[Path] = set()
 
     def _resolve_and_fetch(repo_root: Path) -> None:
         resolved = base or repo.default_branch(repo_root)
         if resolved is None:
-            fetch_error_by_repo[repo_root] = "could not resolve the default branch; no origin remote?"
+            if base is None and not repo.has_origin(repo_root):
+                # A local-only repo has nothing to sync from; that's a skip,
+                # not an error.
+                no_remote_repos.add(repo_root)
+            else:
+                fetch_error_by_repo[repo_root] = "could not resolve the default branch from origin"
             return
         try:
             git.fetch_base(repo_root, resolved)
@@ -1560,6 +1566,11 @@ def cmd_sync(
     for repo_root in scope:
         rows: list[tuple[str, str, str]] = []
         rows_by_repo[repo_root] = rows
+
+        if repo_root in no_remote_repos:
+            n_skipped += 1
+            rows.append(_sync_row("skip", "dim", "base fetch", "no origin remote; local-only repo"))
+            continue
 
         if repo_root in fetch_error_by_repo:
             n_error += 1

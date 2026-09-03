@@ -112,6 +112,18 @@ def default_branch(repo: Path, *, timeout: float = 5.0) -> str | None:
     return None
 
 
+def has_origin(repo: Path) -> bool:
+    """Whether REPO has an 'origin' remote configured. Local-only repos don't,
+    which for `sync` is a skip (there's nothing to fetch from), not an error."""
+    return (
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "get-url", "origin"],
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+
 def known_repos() -> list[Path]:
     """Repos registered in the shared `wt`/`coppice` registry file."""
     if not REGISTRY_PATH.exists():
