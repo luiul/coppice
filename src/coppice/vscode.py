@@ -4,43 +4,110 @@ the confirmation prompts of the commands that delete worktree directories
 that has it open strands the window on a deleted folder, so the prompt
 marks those worktrees and suggests closing the window first.
 
-One osascript call lists every open VS Code window's title (via System
-Events), and a title is matched against a worktree by the ecosystem's
-`window.title` convention (`${rootName} — ${branch} — ${editor}`): the
-title's root component must be the worktree path's basename and its branch
-component the worktree's branch, so a window on the main checkout
-("tardis-community — master — ...") never matches a worktree of the same
-repo ("tardis-community — feat-x — ...").
+The primary source is the window registry: every VS Code window
+self-registers into ~/.local/state/vscode-windows/ via dashkit's
+vscode-window-registry extension (one small JSON file per window, with a
+heartbeat). A worktree matches when a fresh entry's folder IS the
+worktree path or sits inside it. Identity is a folder path, never a
+title, so same-named worktrees and phantom branches (a main-checkout
+window whose SCM view has the worktree as its active repository) cannot
+produce false warnings.
 
-A stricter port of mycelium's matchVSCodeWindowTitle (the Go original
-the dashkit dashboards poll for their "VS Code open?" column), same rule
-as mycelium's matchVSCodeWindowTitleStrict: the dashboards' match keeps a
-branchless title as a weak fallback (open-or-focus semantics, where a
-false "open" merely focuses a window), while this one drops it: a false
-"open" on a deletion prompt cries wolf, and the weak fallback would fire
-on every removal while any bare-titled window of that repo is around (a
-main checkout whose SCM branch hasn't resolved renders as the plain
-folder name). Observed live on the sandbox repo: two bare "sandbox"
-scratch windows made every sandbox worktree removal warn.
+When the registry cannot answer (extension not installed, no fresh
+entries), the previous mechanism runs unchanged: one osascript call lists
+every open VS Code window's title (via System Events), and a title is
+matched against a worktree by the ecosystem's `window.title` convention
+(`${rootName} — ${branch} — ${editor}`): the title's root component must
+be the worktree path's basename and its branch component the worktree's
+branch, so a window on the main checkout ("tardis-community — master —
+...") never matches a worktree of the same repo ("tardis-community —
+feat-x — ...").
 
-What the strictness cannot fix: a window scoped to the main checkout
-whose SCM view has a worktree as its active repository renders that
-worktree's branch in its title without having the worktree's folder
-open, indistinguishable from a genuine worktree window's title. Those
-phantoms still match; the warning's advice is harmless for them.
+The title match is a stricter port of mycelium's matchVSCodeWindowTitle
+(the Go original the dashkit dashboards poll for their "VS Code open?"
+column), same rule as mycelium's matchVSCodeWindowTitleStrict: the
+dashboards' match keeps a branchless title as a weak fallback
+(open-or-focus semantics, where a false "open" merely focuses a window),
+while this one drops it: a false "open" on a deletion prompt cries wolf,
+and the weak fallback would fire on every removal while any bare-titled
+window of that repo is around (a main checkout whose SCM branch hasn't
+resolved renders as the plain folder name). Observed live on the sandbox
+repo: two bare "sandbox" scratch windows made every sandbox worktree
+removal warn.
+
+What the strictness cannot fix (and the registry does): a window scoped
+to the main checkout whose SCM view has a worktree as its active
+repository renders that worktree's branch in its title without having
+the worktree's folder open, indistinguishable from a genuine worktree
+window's title. On the title path those phantoms still match; the
+warning's advice is harmless for them.
 
 Everything is best-effort: a failed listing (osascript missing, the macOS
-Automation permission not granted) returns None, and callers treat None
-as "can't tell" and stay silent rather than ever claiming "not open".
-Code simply not running is not a failure, just an empty listing.
+Automation permission not granted) or an unreadable registry returns
+None, and callers treat None as "can't tell" and stay silent rather than
+ever claiming "not open". Code simply not running is not a failure,
+just an empty listing.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
+import time
+from collections.abc import Iterable
 from pathlib import Path
+
+# The registry contract (writer: dashkit's vscode-window-registry
+# extension): one <sessionId>.json per window, rewritten every 5s, so an
+# entry whose mtime is older than 30s belongs to a closed window and is
+# dropped. Window close can't be relied on to delete the file; staleness
+# pruning is the cleanup.
+_REGISTRY_DIR = Path.home() / ".local" / "state" / "vscode-windows"
+_REGISTRY_STALENESS_SECONDS = 30.0
+
+
+def registry_window_folders() -> list[list[str]] | None:
+    """The workspace folders of every window with a fresh registry entry,
+    or None when the registry directory can't be read (the extension
+    isn't installed). An empty list is a real answer ("the registry
+    works, no window is fresh"), distinct from None; both send callers
+    to the title fallback, same as mycelium.
+
+    Stale, unreadable, and unparseable files are skipped, never fatal:
+    one torn write must not take detection down for every window.
+    """
+    if not _REGISTRY_DIR.is_dir():
+        return None
+    now = time.time()
+    windows: list[list[str]] = []
+    for file in _REGISTRY_DIR.glob("*.json"):
+        try:
+            if now - file.stat().st_mtime > _REGISTRY_STALENESS_SECONDS:
+                continue
+            entry = json.loads(file.read_text())
+        except OSError:
+            continue
+        except ValueError:  # torn write; not JSON
+            continue
+        folders = entry.get("folders")
+        if isinstance(folders, list):
+            windows.append([f for f in folders if isinstance(f, str)])
+    return windows
+
+
+def registry_matches_worktree(folders: Iterable[str], path: Path) -> bool:
+    """Whether a window with FOLDERS open would be stranded by deleting
+    the worktree at PATH: a folder equals the path or sits inside it, on
+    a path-element boundary ("/wt-a" must not match "/wt-a-b"). Strict
+    by construction: no branch, no title, so the phantom-branch class of
+    false positives cannot occur.
+    """
+    target = str(path)
+    prefix = target + "/"
+    return any(f == target or f.startswith(prefix) for f in folders)
+
 
 # What VS Code's `${separator}` template variable renders as: a dash (any
 # width) flanked by spaces. Same regex as mycelium's titleSeparator.

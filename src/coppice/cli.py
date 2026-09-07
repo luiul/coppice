@@ -910,13 +910,22 @@ def _open_vscode_windows(worktrees: dict[tuple[Path, str], Path]) -> set[tuple[P
     a VS Code window open on their worktree, for a confirmation prompt's
     warning.
 
-    One osascript round-trip for the whole batch. Best-effort: an empty
-    mapping short-circuits, and a failed window listing (see
-    vscode.open_window_titles) answers empty, so the prompt stays silent
-    rather than ever claiming "not open".
+    The window registry answers first (exact folder paths, one directory
+    read for the whole batch); when it cannot answer, one osascript
+    round-trip runs the strict title match. Best-effort either way: an
+    empty mapping short-circuits, and a failed source (see
+    vscode.registry_window_folders and vscode.open_window_titles)
+    answers empty, so the prompt stays silent rather than ever claiming
+    "not open".
     """
     if not worktrees:
         return set()
+    if window_folders := vscode.registry_window_folders():
+        return {
+            key
+            for key, path in worktrees.items()
+            if any(vscode.registry_matches_worktree(folders, path) for folders in window_folders)
+        }
     titles = vscode.open_window_titles()
     if not titles:
         return set()

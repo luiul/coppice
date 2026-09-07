@@ -447,10 +447,14 @@ prompt behaves the same way: one keypress, no enter needed.
 - When a worktree about to be removed has a VS Code window open on it,
   `remove` and `clean` mark its line with `(VS Code window open)` and
   suggest closing it first: deleting the directory out from under the
-  window strands it. Detection is one read-only osascript window listing
-  matched by the ecosystem's `window.title` convention (same rule as
-  mycelium's), and a failed listing stays silent rather than ever
-  claiming "not open".
+  window strands it. Detection reads the window registry
+  (`~/.local/state/vscode-windows/`, written by dashkit's
+  vscode-window-registry extension) and matches exact folder paths, so
+  same-named worktrees and phantom branches can't warn wrongly. Without
+  the extension it falls back to a read-only osascript window listing
+  matched by the ecosystem's `window.title` convention (same strict
+  rule as mycelium's). Either way a failed source stays silent rather
+  than ever claiming "not open".
 
 Same discipline as the canopy/understory dashboards (see dashkit's
 [CONVENTIONS.md](https://github.com/luiul/dashkit/blob/main/CONVENTIONS.md)),
