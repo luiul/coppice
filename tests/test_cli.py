@@ -632,8 +632,7 @@ def test_clean_marks_candidates_with_an_open_vscode_window(tmp_path, monkeypatch
         _entry("main", tmp_path / "repo", is_main=True),
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
-    monkeypatch.setattr(vscode, "registry_window_folders", lambda: None)
-    monkeypatch.setattr(vscode, "open_window_titles", lambda: ["mergeable — mergeable-branch"])
+    monkeypatch.setattr(vscode, "registry_window_folders", lambda: [[str(tmp_path / "mergeable")]])
 
     result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--dry-run"])
 
@@ -868,36 +867,15 @@ def test_remove_without_yes_prompts_and_proceeds_on_yes(tmp_path, monkeypatch):
 def test_remove_marks_a_target_with_an_open_vscode_window(tmp_path, monkeypatch):
     """A worktree a VS Code window has open gets marked in remove's
     confirmation listing, with the close-it-first note: deleting the
-    directory out from under the window strands it."""
-    repo_dir = _init_repo(tmp_path / "repo")
-    _stub_wt(monkeypatch)
-    entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
-    monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
-    monkeypatch.setattr(vscode, "registry_window_folders", lambda: None)
-    monkeypatch.setattr(vscode, "open_window_titles", lambda: ["good — good-branch — x.py"])
-
-    result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
-
-    assert "(VS Code window open)" in result.output
-    assert "Close the marked windows first" in result.output
-
-
-def test_remove_marks_a_window_found_via_the_registry(tmp_path, monkeypatch):
-    """The registry is the primary source: a fresh entry whose folder is
-    the worktree (or inside it) marks the line, and the osascript title
-    listing is never consulted."""
+    directory out from under the window strands it. The window registry
+    is the source: a fresh entry whose folder is the worktree (or inside
+    it) marks the line."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
     monkeypatch.setattr(vscode, "registry_window_folders", lambda: [[str(tmp_path / "good")]])
-
-    def titles_fail():
-        raise AssertionError("the title listing must not run when the registry answers")
-
-    monkeypatch.setattr(vscode, "open_window_titles", titles_fail)
 
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
 
@@ -914,7 +892,6 @@ def test_remove_registry_match_respects_path_element_boundaries(tmp_path, monkey
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
     monkeypatch.setattr(vscode, "registry_window_folders", lambda: [[str(tmp_path / "good-old")]])
-    monkeypatch.setattr(vscode, "open_window_titles", lambda: [])
 
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
 
@@ -922,15 +899,14 @@ def test_remove_registry_match_respects_path_element_boundaries(tmp_path, monkey
 
 
 def test_remove_stays_silent_when_windows_cannot_be_listed(tmp_path, monkeypatch):
-    """A failed window listing is 'can't tell': no marker, no note, rather
-    than a claim of 'not open'."""
+    """An unreadable registry (extension not installed) is 'can't tell':
+    no marker, no note, rather than a claim of 'not open'."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
     monkeypatch.setattr(vscode, "registry_window_folders", lambda: None)
-    monkeypatch.setattr(vscode, "open_window_titles", lambda: None)
 
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
 
