@@ -3,7 +3,6 @@
 stubbed one.
 """
 
-import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -88,29 +87,11 @@ def _capture_wt_subprocess(monkeypatch) -> list[dict[str, Any]]:
     return calls
 
 
-def test_switch_hands_extra_env_to_the_wt_subprocess(monkeypatch, tmp_path):
-    """`cop new --prompt` rides on this: COP_PROMPT must reach `wt`'s
-    subprocess environment (and through it, `wt`'s hooks) intact, quotes,
-    dollar signs and all, merged over the inherited environment rather than
-    replacing it.
-    """
-    calls = _capture_wt_subprocess(monkeypatch)
-
-    result = wt.switch(tmp_path, "some-branch", create=True, extra_env={"COP_PROMPT": 'hello "world" $foo'})
-
-    assert result == {"action": "created"}
-    env = calls[0]["env"]
-    assert env["COP_PROMPT"] == 'hello "world" $foo'
-    assert env["PATH"] == os.environ["PATH"]
-
-
-def test_switch_without_extra_env_inherits_the_environment_as_is(monkeypatch, tmp_path):
-    """No EXTRA_ENV means env=None: the `wt` child inherits this process's
-    environment untouched, so a plain `cop new` can never leak a COP_PROMPT
-    into a hook.
-    """
+def test_switch_lets_the_wt_subprocess_inherit_the_environment(monkeypatch, tmp_path):
+    """env is never passed: the `wt` child inherits this process's environment
+    untouched."""
     calls = _capture_wt_subprocess(monkeypatch)
 
     wt.switch(tmp_path, "some-branch")
 
-    assert calls[0]["env"] is None
+    assert "env" not in calls[0]

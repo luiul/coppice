@@ -316,7 +316,7 @@ that branch's **worktree**, not the branch itself:
 
 | Command | Takes | Does |
 |---|---|---|
-| `cop new PATH [--branch B] [--base REF] [--prompt TXT]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache), plus a worktree checked out onto it; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y`. With `--prompt`, opens the worktree's VS Code window with `pi` already running `TXT` (setup in [`cop new --prompt`](#cop-new---prompt-start-pi-in-the-new-window)) |
+| `cop new PATH [--branch B] [--base REF]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache), plus a worktree checked out onto it; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y` |
 | `cop list [PATH]` | nothing, or a repo path | lists worktrees, one per checked-out branch, **not** every branch in the repo, and **not** the main worktree (see [Concepts](#concepts)) |
 | `cop sync [BRANCH...]` | nothing, or branch **names** | merges the repo's base remote into each branch's worktree (all of them by default), keeping long-lived worktrees current |
 | `cop remove BRANCH...` | one or more branch **names** | deletes each branch's worktree directory; the branch itself survives unless it's merged or `-D`/`--force-delete` is passed |
@@ -407,7 +407,6 @@ cop new ~/dbt-models                     # create branch + worktree for the repo
 cop new .                                # ...for the repo you're standing in
 cop new . --branch update-dag-schedule   # skip the prompt, use a specific branch name
 cop new . --branch update-dag-schedule --yes   # skip the confirmation when the branch already exists
-cop new . -p "fix the flaky login test"  # open the worktree's VS Code window with pi already running this prompt
 cop sync                                 # fetch each repo's base remote and merge it into every worktree
 cop sync --dry-run                       # preview what would be merged, changing nothing
 cop sync feat-a feat-b                   # ...just these branches' worktrees
@@ -469,76 +468,6 @@ configured (see [Automate everything that happens around a
 worktree](#automate-everything-that-happens-around-a-worktree)), or
 otherwise by `coppice new` the first time it touches a repo. After that,
 the repo stays visible to every command from anywhere on disk.
-
-### `cop new --prompt`: start pi in the new window
-
-`cop new . -p "fix the flaky login test"` hands the prompt to `wt`'s hooks
-as `$COP_PROMPT`. With the hook below in your wt config, the worktree's new
-VS Code window then opens with `pi` already running that prompt in its
-integrated terminal, on create and on reuse of an existing worktree alike.
-Without the hook the option is a silent no-op: `cop` only sets the variable.
-
-The mechanics live entirely in wt's user config: a slim `post-switch` hook
-calls [cop-prompt-deliver.sh](https://github.com/luiul/dotfiles/blob/main/worktrunk/.config/worktrunk/cop-prompt-deliver.sh)
-(see it in context in [my wt
-config](https://github.com/luiul/dotfiles/blob/main/worktrunk/.config/worktrunk/config.toml)),
-which delivers the prompt two ways:
-
-1. **Fast path (AppleScript, macOS)**: `code -n` opens (or focuses, on
-   reuse) the worktree window; the script finds that window by its title
-   (matching `<repo> — <branch>`, relying on the `window.title` setting
-   `"${rootName} — ${activeRepositoryBranchName} — ${activeEditorShort}"`),
-   opens a terminal pane via AppleScript menu commands, pastes `pi
-   '<prompt>'` into it (via clipboard, safely restoring afterward), and hits
-   Return. The prompt string is passed through a temp file to avoid
-   multibyte corruption in AppleScript's env-var boundary crossing.
-   Measured on this machine: `pi` starts ~1.5s after the window appears, vs
-   ~3.2s waiting for the task system to start on a folderOpen task.
-   Delivery is confirmed by waiting for a new `pi` process whose working
-   directory is the worktree; anything less (failed window match, no
-   Accessibility permission, VS Code not running) triggers the fallback.
-2. **Fallback (folderOpen task)**: when the drive is impossible (no
-   Accessibility permission, VS Code not running) or fails (focus lost to
-   another window mid-drive, window title never matched), the script writes
-   the prompt to `.cop-prompt` in the worktree, drops a self-cleaning
-   `runOn: folderOpen` task into the worktree's `.vscode/tasks.json`
-   (merging into the repo's own one when it exists and is plain JSON), and
-   VS Code runs it in a terminal as the window loads: the task reads the
-   prompt, deletes `.cop-prompt` (and the tasks.json too, when the script
-   wrote it fresh), and starts `pi`. Reopening the folder later runs
-   nothing.
-
-A guard on the usual `post-start` window opener keeps create-with-prompt
-from opening two windows, and the `copy-ignored` exclude keeps a stray
-`.cop-prompt` in the main checkout from being reflinked over the one the
-fallback just wrote:
-
-```toml
-[step.copy-ignored]
-exclude = [".cop-prompt"]
-
-[post-start]
-vscode = '[ -n "$COP_PROMPT" ] || code -n {{ worktree_path }}'
-
-[post-switch]
-pi-prompt = '[ -n "$COP_PROMPT" ] && "$HOME/.config/worktrunk/cop-prompt-deliver.sh" "{{ worktree_path }}" "{{ repo }}" "{{ branch }}"'
-```
-
-One-time setup, per delivery path:
-
-- Fast path: Accessibility permission for Terminal (System Settings >
-  Privacy & Security > Accessibility > Terminal.app). The script drives
-  VS Code's menu bar via AppleScript and pastes the prompt via the system
-  clipboard (which it saves and restores).
-- Fallback: `"task.allowAutomaticTasks": "on"` in the user settings (or
-  click Allow on the one-time prompt the first folder-open task triggers,
-  which sets the same thing), and the worktree directory trusted; VS Code
-  runs no tasks at all in untrusted workspaces.
-- Both: `pi` on `PATH` for the integrated terminal.
-
-`cop` runs a non-blocking preflight on every `--prompt` invocation and prints
-a dim warning when `pi` or the VS Code setting is missing, or when the repo
-already has a `.vscode/tasks.json` the fallback will merge into.
 
 ### Shell integration, in more detail
 
