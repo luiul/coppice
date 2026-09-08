@@ -1056,6 +1056,14 @@ def _merge_count(path: Path) -> str:
     return _git(path, "rev-list", "--count", "--merges", "HEAD")
 
 
+def _attention_part(output: str) -> str:
+    """The output from the 'Needs attention:' heading on, the closing extract
+    sync prints after the counts line, so assertions can tell 'listed as
+    needing attention' apart from 'shown once in the report table above'."""
+    assert "Needs attention:" in output
+    return output.split("Needs attention:", 1)[1]
+
+
 def test_sync_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)
@@ -1088,6 +1096,8 @@ def test_sync_merges_base_into_behind_worktree(tmp_path, monkeypatch):
     )
     # The main worktree was fast-forwarded too (rolled up in the summary).
     assert "fast-forwarded 1 main checkout" in result.output
+    # A fully successful run has no closing extract.
+    assert "Needs attention" not in result.output
     # ...and the report is a list-style sectioned table.
     assert "Worktree" in result.output and "Result" in result.output and "Detail" in result.output
     assert "day2" in (repo_dir / "f.txt").read_text()
@@ -1104,6 +1114,7 @@ def test_sync_up_to_date_worktree_is_left_alone(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "Everything is already up to date." in result.output
+    assert "Needs attention" not in result.output
     assert _merge_count(feat) == "0"
 
 
@@ -1218,8 +1229,65 @@ def test_sync_skips_stale_and_detached_entries(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "stale" in result.output
     assert "detached HEAD" in result.output
-    assert "1 stale (dangling) reference(s)" in result.output
     assert "cop clean" in result.output
+    # Both fold into the closing 'Needs attention' extract; there is no
+    # separate stale summary line anymore.
+    attention = _attention_part(result.output)
+    assert "stale-branch" in attention and "detached HEAD" in attention
+    assert "stale (dangling) reference(s)" not in result.output
+
+
+def test_sync_needs_attention_lists_only_actionable_rows(tmp_path, monkeypatch):
+    """The closing extract repeats exactly the rows that did not sync
+    correctly (here: a predicted conflict and a dirty skip), and none of
+    the fine ones (the synced worktree, the fast-forwarded main checkout)."""
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    behind = _add_worktree(repo_dir, tmp_path / "behind", "feat-behind")
+    conflict = _add_worktree(repo_dir, tmp_path / "conflict", "feat-conflict", with_commit=False)
+    (conflict / "c.txt").write_text("ours\n")
+    _git(conflict, "add", ".")
+    _git(conflict, "commit", "-qm", "feat c")
+    dirty = _add_worktree(repo_dir, tmp_path / "dirty", "feat-dirty")
+    # origin/main adds c.txt with other content: an add/add conflict for
+    # feat-conflict, a clean new file for everyone else.
+    _advance_origin(origin, tmp_path, filename="c.txt", content="theirs")
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feat-behind", behind),
+        _entry("feat-conflict", conflict),
+        _entry("feat-dirty", dirty, dirty=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    attention = _attention_part(result.output)
+    assert "feat-conflict" in attention and "left untouched" in attention
+    assert "feat-dirty" in attention and "uncommitted changes" in attention
+    assert "feat-behind" not in attention
+    assert "main worktree" not in attention
+
+
+def test_sync_dry_run_still_lists_conflicts_as_needing_attention(tmp_path, monkeypatch):
+    """--dry-run changes nothing, but the classification is real: a predicted
+    conflict still lands in the closing extract."""
+    repo_dir, origin = _init_repo_with_origin(tmp_path)
+    _stub_wt(monkeypatch)
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat-conflict", with_commit=False)
+    (feat / "c.txt").write_text("ours\n")
+    _git(feat, "add", ".")
+    _git(feat, "commit", "-qm", "feat c")
+    _advance_origin(origin, tmp_path, filename="c.txt", content="theirs")
+    entries = [_entry("main", repo_dir, is_main=True), _entry("feat-conflict", feat)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["sync", "--repo", str(repo_dir), "--dry-run"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    assert "Dry run, nothing changed." in result.output
+    assert "feat-conflict" in _attention_part(result.output)
 
 
 def test_sync_unknown_branch_filter_fails(tmp_path, monkeypatch):
@@ -1303,6 +1371,10 @@ def test_sync_repo_with_unreachable_origin_is_an_error(tmp_path, monkeypatch):
     assert "could not resolve the default branch" in result.output
     assert "synced" in result.output
     assert _merge_count(feat) == "1"
+    # The failing repo lands in the closing extract; the synced one doesn't.
+    attention = _attention_part(result.output)
+    assert "could not resolve the default branch" in attention
+    assert "feat-behind" not in attention
 
 
 def test_sync_base_override_merges_that_branch_instead(tmp_path, monkeypatch):

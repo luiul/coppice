@@ -21,7 +21,7 @@ import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, NamedTuple
 
 import typer
 from rich import box
@@ -1423,23 +1423,52 @@ def cmd_clean(
         raise typer.Exit(1)
 
 
-def _sync_row(label: str, style: str, subject: str, note: str = "") -> tuple[str, str, str]:
-    """One `sync` table row as Rich cells: the subject (a branch name or 'main
-    worktree'), the result label, and a dim detail note. A stale entry redifies
-    the subject too, the same convention `list` uses (the whole signal goes
-    bold red, see `_worktree_cells`)."""
-    if style == _STYLE_STALE:
-        subject = f"[{_STYLE_STALE}]{subject}[/]"
-    return subject, f"[{style}]{label}[/]", f"[dim]{note}[/]" if note else ""
+class _SyncRow(NamedTuple):
+    """One `sync` report row as data: the result label ('synced', 'skip',
+    'error', ...), its Rich style, the subject (a branch name, 'main
+    worktree', or 'base fetch'), and an optional detail note. Rows stay
+    unstyled until render time so the closing 'Needs attention' extract can
+    filter and re-render them without scraping markup back off."""
+
+    label: str
+    style: str
+    subject: str
+    note: str = ""
 
 
-def _render_sync_table(sections: list[tuple[Path, str | None, list[tuple[str, str, str]]]]) -> None:
+def _sync_row(label: str, style: str, subject: str, note: str = "") -> _SyncRow:
+    """One `sync` report row; call sites read as (what happened, how it
+    looks, which worktree, why)."""
+    return _SyncRow(label, style, subject, note)
+
+
+def _sync_cells(row: _SyncRow) -> tuple[str, str, str]:
+    """A `_SyncRow` as Rich cells: the subject, the styled result label, and a
+    dim detail note. A stale entry redifies the subject too, the same
+    convention `list` uses (the whole signal goes bold red, see
+    `_worktree_cells`). Shared by both sync renderers so the report table and
+    the 'Needs attention' extract can't drift."""
+    subject = f"[{row.style}]{row.subject}[/]" if row.style == _STYLE_STALE else row.subject
+    return subject, f"[{row.style}]{row.label}[/]", f"[dim]{row.note}[/]" if row.note else ""
+
+
+def _needs_attention(row: _SyncRow) -> bool:
+    """Whether a sync row belongs in the closing 'Needs attention' extract:
+    anything the user should act on (errors, conflicts, stale references,
+    warning-tier skips) rather than an expected state. Yellow is the warning
+    tier everywhere in coppice and dim the expected-state tier, so a dim skip
+    (a local-only repo, the main worktree on another branch) stays out while
+    a yellow one (dirty, diverged, detached) is listed."""
+    return row.label in ("error", "conflict", "stale") or (row.label == "skip" and row.style == "yellow")
+
+
+def _render_sync_table(sections: list[tuple[Path, str | None, list[_SyncRow]]]) -> None:
     """`sync`'s report as one Rich table sectioned by repo, the same visual
     language as `list` (see `_render_list`): SIMPLE_HEAVY box, bold header, a
     repo heading row in the first column (carrying the base ref where `list`
     carries the main branch), worktree rows indented under it, a separator
     between repos. Each section is (repo root, base branch name or None, its
-    `_sync_row`s)."""
+    `_SyncRow`s)."""
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     # no_wrap on the identifier columns: repo headings and branch names must
     # never fold or ellipsize on narrow terminals (a wrapped 'repo (base: ...)'
@@ -1455,8 +1484,29 @@ def _render_sync_table(sections: list[tuple[Path, str | None, list[tuple[str, st
         if base_branch:
             heading += f" [dim](base: origin/{base_branch})[/]"
         table.add_row(heading, "", "")
-        for j, (subject, result, detail) in enumerate(rows):
+        for j, row in enumerate(rows):
+            subject, result, detail = _sync_cells(row)
             table.add_row(f"  {subject}", result, detail, end_section=i < last and j == len(rows) - 1)
+    console.print(table)
+
+
+def _render_sync_attention(sections: list[tuple[Path, str | None, list[_SyncRow]]]) -> None:
+    """`sync`'s closing 'Needs attention' extract: the rows the report table
+    already showed, pre-filtered to the ones the user should act on
+    (`_needs_attention`), so a long run's action items don't scroll away
+    above the counts line. Borderless and headerless, an extract of the
+    table above rather than a second report."""
+    console.print()
+    console.print("[bold]Needs attention:[/]")
+    table = Table(box=None, show_header=False, show_edge=False, pad_edge=False)
+    table.add_column(no_wrap=True)
+    table.add_column(no_wrap=True)
+    table.add_column()
+    for repo_root, _base_branch, rows in sections:
+        table.add_row(f"[bold]{repo_root.name}[/]", "", "")
+        for row in rows:
+            subject, result, detail = _sync_cells(row)
+            table.add_row(f"  {subject}", result, detail)
     console.print(table)
 
 
@@ -1502,7 +1552,9 @@ def cmd_sync(
     Worktrees whose merge would conflict are predicted with `git merge-tree`
     and left untouched, reported as conflicts, so a worktree is never left
     half-merged. Never prompts: syncing only adds merge commits to clean
-    branches, and conflicts are skipped rather than forced.
+    branches, and conflicts are skipped rather than forced. Ends with a
+    'Needs attention' list of everything that did not sync, so long runs
+    need no scrolling back.
 
     Examples:
         coppice sync                        # every worktree in every known repo
@@ -1572,11 +1624,11 @@ def cmd_sync(
     ):
         list(pool.map(_resolve_and_fetch, scope))
 
-    n_synced = n_current = n_skipped = n_conflict = n_stale = n_main_ff = n_error = 0
-    rows_by_repo: dict[Path, list[tuple[str, str, str]]] = {}
+    n_synced = n_current = n_skipped = n_conflict = n_main_ff = n_error = 0
+    rows_by_repo: dict[Path, list[_SyncRow]] = {}
 
     for repo_root in scope:
-        rows: list[tuple[str, str, str]] = []
+        rows: list[_SyncRow] = []
         rows_by_repo[repo_root] = rows
 
         if repo_root in no_remote_repos:
@@ -1645,7 +1697,6 @@ def cmd_sync(
                 continue
 
             if _is_stale(w):
-                n_stale += 1
                 rows.append(
                     _sync_row("stale", _STYLE_STALE, branch_name or "?", "worktree directory is gone; run 'cop clean'")
                 )
@@ -1729,8 +1780,17 @@ def cmd_sync(
         if n_error:
             summary += f", [red]{_plural(n_error, 'error')}[/]"
         console.print(summary + ".")
-    if n_stale:
-        console.print(f"[red]{n_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove.")
+
+    # The closing extract of everything that did not sync correctly, so a
+    # long run's action items don't scroll away above the counts line.
+    # Stale references fold in here too (their note carries the 'cop clean'
+    # hint) instead of getting a separate summary line.
+    attention = [
+        (repo_root, base_branch, [row for row in rows if _needs_attention(row)])
+        for repo_root, base_branch, rows in sections
+    ]
+    if attention := [section for section in attention if section[2]]:
+        _render_sync_attention(attention)
     if dry_run:
         console.print("Dry run, nothing changed.")
     console.print()
