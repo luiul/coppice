@@ -124,3 +124,36 @@ def test_ff_only_fast_forwards_and_refuses_divergence(tmp_path):
     git.fetch_base(repo_dir, "main")
     with pytest.raises(git.GitError):
         git.ff_only(repo_dir, "origin/main")
+
+
+def test_switch_in_place_changes_the_branch_without_leaving_the_directory(tmp_path):
+    repo_dir, _origin = _init_with_origin(tmp_path)
+    _git(repo_dir, "switch", "-qc", "feat")
+    _git(repo_dir, "switch", "-q", "main")
+
+    report = git.switch_in_place(repo_dir, "feat")
+
+    assert _git(repo_dir, "branch", "--show-current") == "feat"
+    assert "feat" in report
+
+
+def test_switch_in_place_creates_the_branch_from_base_when_asked(tmp_path):
+    """The create variant behind `new`'s occupied-path remedy: the branch
+    doesn't exist yet, so it is forked from BASE, not from the worktree's
+    current HEAD."""
+    repo_dir, _origin = _init_with_origin(tmp_path)
+    _git(repo_dir, "switch", "-qc", "feat")
+    (repo_dir / "feat.txt").write_text("feat\n")
+    _git(repo_dir, "add", ".")
+    _git(repo_dir, "commit", "-qm", "feat work")
+
+    git.switch_in_place(repo_dir, "brand-new", create=True, base="main")
+
+    assert _git(repo_dir, "branch", "--show-current") == "brand-new"
+    assert not (repo_dir / "feat.txt").exists()
+
+
+def test_switch_in_place_raises_on_an_unknown_branch(tmp_path):
+    repo_dir, _origin = _init_with_origin(tmp_path)
+    with pytest.raises(git.GitError):
+        git.switch_in_place(repo_dir, "does-not-exist")

@@ -1,9 +1,10 @@
-"""Plain `git` subprocess helpers for `coppice sync`.
+"""Plain `git` subprocess helpers.
 
-`wt.py` wraps the `wt` binary; this module wraps the git operations `sync`
+`wt.py` wraps the `wt` binary; this module wraps the git operations coppice
 needs that `wt` doesn't provide: fetching a repo's base branch, ancestry and
 merge-conflict checks via plumbing (so classification stays side-effect
-free), and the actual merges into a worktree.
+free), the actual merges into a worktree, and the in-place branch switch
+behind `new`'s occupied-path remedy.
 """
 
 from __future__ import annotations
@@ -82,3 +83,19 @@ def merge_abort(wt_path: Path) -> None:
 def ff_only(wt_path: Path, ref: str) -> None:
     """Fast-forward the branch checked out at WT_PATH to REF."""
     _git(["merge", "--ff-only", ref], cwd=wt_path)
+
+
+def switch_in_place(wt_path: Path, branch: str, *, create: bool = False, base: str | None = None) -> str:
+    """Switch the worktree at WT_PATH onto BRANCH without leaving the
+    directory (plain `git switch`), forking BRANCH from BASE first when
+    CREATE is set. Returns git's own one-line report ('Switched to ...',
+    which git prints on stderr) for the caller to echo."""
+    args = ["switch"]
+    if create:
+        args += ["-c", branch]
+        if base:
+            args.append(base)
+    else:
+        args.append(branch)
+    proc = _git(args, cwd=wt_path)
+    return (proc.stderr or proc.stdout).strip()

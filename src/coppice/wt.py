@@ -10,9 +10,13 @@ own config.
 
 from __future__ import annotations
 
+import codecs
 import json
+import os
 import shutil
 import subprocess
+import sys
+import threading
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -26,17 +30,20 @@ class WtNotFoundError(RuntimeError):
 class WtCommandError(RuntimeError):
     """A `wt` invocation failed; carries its stderr, when it was captured.
 
-    stderr is None for invocations run with stream=True: their stderr went
-    straight to the terminal, so the detail is already on screen by the
-    time this raises and the message falls back to the short "exited N"
-    form instead of re-printing anything.
+    Streamed invocations (stream=True) tee stderr: it goes to the terminal
+    live AND lands in .stderr. Their message stays the short "exited N"
+    form (the detail is already on screen, re-printing it would double it),
+    but callers can still inspect .stderr for what `wt` actually said, and
+    .streamed tells them it was already shown.
     """
 
-    def __init__(self, args: list[str], returncode: int, stderr: str | None) -> None:
+    def __init__(self, args: list[str], returncode: int, stderr: str | None, *, streamed: bool = False) -> None:
         self.wt_args = args
         self.returncode = returncode
         self.stderr = stderr
-        super().__init__((stderr or "").strip() or f"wt {' '.join(args)} exited {returncode}")
+        self.streamed = streamed
+        detail = "" if streamed else (stderr or "").strip()
+        super().__init__(detail or f"wt {' '.join(args)} exited {returncode}")
 
 
 def require_wt() -> str:
@@ -57,23 +64,65 @@ def run(
     if cwd is not None:
         cmd += ["-C", str(cwd)]
     cmd += args
-    # env is left unset: the child inherits this process's environment as-is.
-    # stream=True hands the child this process's stderr instead of a pipe.
-    # stderr is `wt`'s human channel (hook progress, status lines, config
-    # warnings), and the mutating commands should show it live: a slow
-    # pre-switch fetch under `cop new` otherwise looks like a hang, and a
-    # config typo's warning would stay invisible forever. stdout stays
-    # piped either way, it carries the JSON we parse. The machine-read,
-    # parallelized list path keeps both streams captured (stream=False).
+    # env is left unset: the child inherits this process's environment
+    # as-is (the streaming path makes one deliberate exception, see there).
+    if stream:
+        return _run_streaming(cmd, args, check)
+    # The machine-read, parallelized list path keeps both streams captured:
+    # concurrent `wt` children would interleave on the shared terminal.
     proc = subprocess.run(
         cmd,
-        stdout=subprocess.PIPE,
-        stderr=None if stream else subprocess.PIPE,
+        capture_output=True,
         text=True,
     )
     if check and proc.returncode != 0:
         raise WtCommandError(args, proc.returncode, proc.stderr)
     return proc
+
+
+def _run_streaming(cmd: list[str], wt_args: list[str], check: bool) -> subprocess.CompletedProcess[str]:
+    """Run CMD with the child's stderr shown live on our own AND kept.
+
+    stderr is `wt`'s human channel (hook progress, status lines, config
+    warnings): the mutating commands must show it live, a slow pre-switch
+    fetch under `cop new` otherwise looks like a hang, and a config typo's
+    warning would stay invisible forever. But plainly inheriting the
+    terminal (stderr=None) throws the text away, and with it the caller's
+    chance to react to what `wt` said (cmd_new's occupied-path remedy
+    keys off the error's wording). So stderr goes through a pipe, tee'd to
+    the terminal chunk by chunk as it arrives. stdout stays piped either
+    way, it carries the JSON we parse.
+
+    A pipe hides the terminal from `wt`, which would strip its colors, so
+    CLICOLOR_FORCE=1 is set when our own stderr is a terminal: the one
+    deliberate exception to the inherit-the-environment-as-is rule.
+    """
+    err_stream = sys.stderr  # capture once; test harnesses swap it per test
+    env = None
+    if err_stream is not None and err_stream.isatty():
+        env = {**os.environ, "CLICOLOR_FORCE": "1"}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+    chunks: list[bytes] = []
+
+    def _tee() -> None:
+        assert proc.stderr is not None
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        while chunk := proc.stderr.read1(4096):
+            chunks.append(chunk)
+            if err_stream is not None:
+                err_stream.write(decoder.decode(chunk))
+                err_stream.flush()
+
+    tee = threading.Thread(target=_tee, daemon=True)
+    tee.start()
+    assert proc.stdout is not None
+    stdout = proc.stdout.read().decode("utf-8", errors="replace")
+    returncode = proc.wait()
+    tee.join()
+    stderr = b"".join(chunks).decode("utf-8", errors="replace")
+    if check and returncode != 0:
+        raise WtCommandError(wt_args, returncode, stderr, streamed=True)
+    return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
 
 
 def _load_json(text: str) -> Any:
@@ -163,6 +212,28 @@ def switch(
     args += ["--no-cd", "--format", "json", branch]
     proc = run(args, cwd=repo, stream=True)
     return _load_json(proc.stdout)
+
+
+def relocate_preview(repo: Path, branch: str) -> list[dict[str, str]]:
+    """Dry-run `wt step relocate BRANCH`: the [{"from":..., "to":...}] moves
+    it would make. Empty when BRANCH can't be relocated (locked, detached
+    HEAD, or a blocked target, `wt` reports those under 'skipped')."""
+    proc = run(["step", "relocate", "--dry-run", "--format", "json", branch], cwd=repo)
+    return _load_json(proc.stdout).get("entries", [])
+
+
+def relocate(repo: Path, branch: str, targets: list[dict[str, str]]) -> None:
+    """Relocate BRANCH's worktree to its expected path, performing the moves
+    TARGETS (a `relocate_preview` result) listed.
+
+    Pre-creates each target's parent directory first: relocate shells out
+    to `git worktree move`, which refuses a target whose parent doesn't
+    exist yet ("No such file or directory"), and the parent of a
+    never-created branch path never exists yet.
+    """
+    for target in targets:
+        Path(target["to"]).expanduser().parent.mkdir(parents=True, exist_ok=True)
+    run(["step", "relocate", "--yes", branch], cwd=repo, stream=True)
 
 
 def prune_stale(repo: Path, path: str) -> None:

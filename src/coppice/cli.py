@@ -16,6 +16,8 @@ will then `cd` you into the resulting worktree.
 
 from __future__ import annotations
 
+import os
+import re
 import shutil
 import subprocess
 import time
@@ -127,6 +129,7 @@ _STYLE_CONFLICT = "red"
 _STYLE_DIRTY = "yellow"
 _STYLE_STALE = "bold red"
 _STYLE_CURRENT = "bold green"
+_STYLE_MISMATCH = "magenta"
 
 # Output spacing convention: one blank line before a command's first output
 # line and one after its last (breathing room against the shell prompt on
@@ -248,13 +251,14 @@ def cmd_new(
         base = repo.default_branch(repo_root)
 
     try:
-        result = wt.switch(
-            repo_root,
-            branch,
-            create=create,
-            base=base,
-        )
-    except (wt.WtNotFoundError, wt.WtCommandError) as exc:
+        result = _switch_with_recovery(repo_root, branch, create=create, base=base)
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+    except wt.WtCommandError as exc:
+        # A streamed failure already put `wt`'s own message on screen live;
+        # piling the short "exited N" form on top of it adds nothing.
+        if exc.streamed:
+            raise typer.Exit(1) from exc
         raise _fail(str(exc)) from exc
 
     repo.register_repo(repo_root)
@@ -283,6 +287,128 @@ def cmd_new(
 
     if result_path:
         shell.write_cd_file(Path(result_path))
+
+
+def _switch_with_recovery(repo_root: Path, branch: str, *, create: bool, base: str | None) -> dict[str, Any]:
+    """`wt.switch` plus one recovery: when the switch fails because BRANCH's
+    worktree path is occupied by a worktree sitting on a different branch,
+    offer to switch that worktree onto BRANCH in place (`wt`'s own suggested
+    remedy), then retry the switch so the normal flow (hooks, registration,
+    success output) continues unchanged.
+    """
+    try:
+        return wt.switch(repo_root, branch, create=create, base=base)
+    except wt.WtCommandError as exc:
+        if not _recover_occupied_path(repo_root, branch, exc, create=create, base=base):
+            raise
+        # What the retry needs depends on the remedy: an in-place switch
+        # made BRANCH exist either way (`wt` refuses --create for an
+        # existing branch), while a relocate freed the path but created
+        # nothing, so a brand-new branch still needs --create.
+        retry_create = create and not wt.branch_exists(repo_root, branch)
+        return wt.switch(repo_root, branch, create=retry_create, base=base if retry_create else None)
+
+
+def _recover_occupied_path(
+    repo_root: Path, branch: str, exc: wt.WtCommandError, *, create: bool, base: str | None
+) -> bool:
+    """Offer the remedy for the occupied-path `wt switch` failure: the
+    directory `wt` wants for BRANCH already hosts a worktree checked out on
+    a DIFFERENT branch (a worktree created for BRANCH earlier, later `git
+    switch`ed away by hand, which `wt list` reports as a
+    branch_worktree_mismatch and `wt switch` refuses to touch).
+
+    Two remedies, offered as one prompt each:
+
+    - When the occupier is itself at the wrong path (a
+      branch_worktree_mismatch), relocate it to its own expected path
+      (`wt step relocate`): both worktrees survive, and BRANCH's path is
+      freed for the retried switch to create fresh.
+    - When the occupier is at its rightful path, the two branches
+      genuinely share one templated path (a sanitize collision), so the
+      only way through is switching the directory onto BRANCH in place
+      (`git switch`, `wt`'s own suggested remedy), evicting the occupier.
+
+    Returns True when the user accepted and the remedy succeeded, so the
+    caller should retry the `wt switch`. Returns False when EXC is any
+    other failure, the caller's normal error handling applies. A declined
+    prompt cancels the whole command, like `new`'s existing-branch prompt
+    does.
+    """
+    # Strip SGR styling first: wt colors its message when the terminal is
+    # visible (the streaming path forces that with CLICOLOR_FORCE), and the
+    # codes land mid-sentence ('run \x1b[4mcd <path> && git switch ...').
+    stderr = re.sub(r"\x1b\[[0-9;]*m", "", exc.stderr or "")
+    if "worktree at the expected path" not in stderr:
+        return False
+    # The absolute path comes from `wt`'s own remedy line ('... run cd
+    # <path> && git switch <branch>'); the first line's copy is ~-shortened.
+    match = re.search(rf"run cd (.+?) && git switch {re.escape(branch)}(?:\s|$)", stderr, re.M)
+    if match is None:
+        return False
+    path = Path(match.group(1))
+    # Cross-check the message against `wt`'s structured listing rather than
+    # trusting the parse alone: the path must be a registered worktree of
+    # this repo, sitting on some branch other than BRANCH.
+    occupying = next(
+        (
+            w
+            for w in wt.list_worktrees(repo_root)
+            if w.get("path") and os.path.realpath(w["path"]) == os.path.realpath(path)
+        ),
+        None,
+    )
+    if occupying is None:
+        return False
+    current = occupying.get("branch")
+    if not current or current == branch:
+        return False
+    if _is_mismatch(occupying):
+        targets = wt.relocate_preview(repo_root, current)
+        if targets:
+            return _offer_relocate(repo_root, branch, current, targets)
+        # `wt` can't relocate it (locked, detached, a blocked target):
+        # fall through to the in-place switch offer.
+    dirty_note = " Its working tree is dirty." if _is_dirty(occupying) else ""
+    console.print()
+    if not confirm.ask(f"Switch the worktree at {_short_path(path)} from '{current}' to '{branch}'?{dirty_note}"):
+        console.print()
+        console.print("Cancelled.")
+        console.print()
+        raise typer.Exit(1)
+    try:
+        report = git.switch_in_place(path, branch, create=create, base=base)
+    except git.GitError as git_exc:
+        raise _fail(str(git_exc)) from git_exc
+    if report:
+        console.print(report)
+    return True
+
+
+def _offer_relocate(repo_root: Path, branch: str, current: str, targets: list[dict[str, str]]) -> bool:
+    """The relocate remedy for `new`'s occupied-path failure: move the
+    occupier (CURRENT) to its own expected path (the moves TARGETS, from
+    `wt.relocate_preview`, say it makes), freeing BRANCH's path for the
+    retried `wt switch`. Always True on success; a declined prompt cancels
+    the command instead of returning.
+    """
+    console.print()
+    if not confirm.ask(
+        f"Relocate '{current}' to {_short_path(Path(targets[0]['to']))}? That frees the path for '{branch}'."
+    ):
+        console.print()
+        console.print("Cancelled.")
+        console.print()
+        raise typer.Exit(1)
+    try:
+        wt.relocate(repo_root, current, targets)
+    except wt.WtCommandError as exc:
+        if exc.streamed:
+            raise typer.Exit(1) from exc
+        raise _fail(str(exc)) from exc
+    except OSError as exc:
+        raise _fail(str(exc)) from exc
+    return True
 
 
 def _creation_ts(path: Path) -> float | None:
@@ -329,6 +455,18 @@ def _is_stale(entry: dict[str, Any]) -> bool:
     red-flagged row.
     """
     return entry.get("worktree", {}).get("state") == "prunable"
+
+
+def _is_mismatch(entry: dict[str, Any]) -> bool:
+    """Whether ENTRY's worktree sits at a path that doesn't match its
+    branch (`wt`'s `worktree.state == "branch_worktree_mismatch"`): the
+    directory was created for a different branch and later `git switch`ed
+    by hand, so listings key the row by its branch while its path names
+    another, and `wt switch` to that other branch refuses the occupied
+    path. The remedy is `wt step relocate` (see `new`'s occupied-path
+    recovery).
+    """
+    return entry.get("worktree", {}).get("state") == "branch_worktree_mismatch"
 
 
 def _humanize_age(seconds: float) -> str:
@@ -518,6 +656,11 @@ def _worktree_cells(
         branch_cell = f"[{_STYLE_CURRENT}]{indent}{branch}[/]"
     else:
         branch_cell = f"{indent}{branch}"
+    if not stale and _is_mismatch(w) and (path := w.get("path")):
+        # The directory names a different branch than the one checked out
+        # in it: name the path's branch segment, so a scan for that branch
+        # (whose own worktree path this occupies) still hits this row.
+        branch_cell += f" [dim]@[/] [{_STYLE_MISMATCH}]{Path(path).parent.name}/[/]"
 
     working_tree = "[dim]-[/]" if stale else (f"[{_STYLE_DIRTY}]dirty[/]" if _is_dirty(w) else "[dim]clean[/]")
     merge_label, merge_style = _merge_status(w)

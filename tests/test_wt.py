@@ -3,6 +3,7 @@
 stubbed one.
 """
 
+import io
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -89,35 +90,81 @@ def _capture_wt_subprocess(monkeypatch) -> list[dict[str, Any]]:
     return calls
 
 
+def _capture_wt_popen(monkeypatch, *, stdout: bytes = b"", stderr: bytes = b"", returncode: int = 0):
+    """Stub `wt` as installed and capture every `subprocess.Popen` call the
+    streaming path makes, without a real `wt` binary. NOTE: `wt.subprocess`
+    is the global subprocess module object, so this patches subprocess.Popen
+    for everyone until the test ends; only call it after any real subprocess
+    setup is done.
+    """
+    monkeypatch.setattr(wt.shutil, "which", lambda _name: "/usr/bin/wt")
+    calls: list[dict[str, Any]] = []
+
+    class FakePopen:
+        def __init__(self, cmd, **kwargs):
+            calls.append({"cmd": cmd, **kwargs})
+            self.stdout = io.BytesIO(stdout)
+            self.stderr = io.BytesIO(stderr)
+
+        def wait(self):
+            return returncode
+
+    monkeypatch.setattr(wt.subprocess, "Popen", FakePopen)
+    return calls
+
+
 def test_switch_lets_the_wt_subprocess_inherit_the_environment(monkeypatch, tmp_path):
-    """env is never passed: the `wt` child inherits this process's environment
-    untouched."""
-    calls = _capture_wt_subprocess(monkeypatch)
+    """env is passed as None (inherit this process's environment untouched)
+    whenever our own stderr is not a terminal, so no CLICOLOR_FORCE leaks
+    into already-piped output."""
+    calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}')
 
     wt.switch(tmp_path, "some-branch")
 
-    assert "env" not in calls[0]
+    assert calls[0]["env"] is None
 
 
-def test_switch_streams_wt_stderr_but_pipes_stdout_for_json(monkeypatch, tmp_path):
+def test_streaming_forces_wt_colors_when_our_stderr_is_a_terminal(monkeypatch, tmp_path):
+    """The tee pipes `wt`'s stderr, which hides the terminal from it and
+    would strip its colors; CLICOLOR_FORCE keeps them when our own stderr
+    is a TTY."""
+
+    class FakeTty(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(wt.sys, "stderr", FakeTty())
+    calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}')
+
+    wt.switch(tmp_path, "some-branch")
+
+    assert calls[0]["env"]["CLICOLOR_FORCE"] == "1"
+
+
+def test_switch_streams_wt_stderr_but_pipes_stdout_for_json(monkeypatch, tmp_path, capsys):
     """stderr is `wt`'s human channel (hook progress, status lines, config
-    warnings): the mutating commands let it through to the terminal live.
-    stdout stays piped, it carries the JSON `switch` parses."""
-    calls = _capture_wt_subprocess(monkeypatch)
+    warnings): the mutating commands tee it to the terminal live AND keep a
+    copy for the caller to inspect. stdout stays piped, it carries the JSON
+    `switch` parses."""
+    calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}', stderr=b"hook progress\n")
 
-    wt.switch(tmp_path, "some-branch")
+    proc = wt.run(["switch", "--no-cd", "--format", "json", "some-branch"], cwd=tmp_path, stream=True)
 
-    assert calls[0]["stderr"] is None
+    assert calls[0]["stderr"] is subprocess.PIPE
     assert calls[0]["stdout"] is subprocess.PIPE
+    assert capsys.readouterr().err == "hook progress\n"
+    assert proc.stderr == "hook progress\n"
+    assert proc.stdout == '{"action": "created"}'
 
 
-def test_remove_streams_wt_stderr_too(monkeypatch, tmp_path):
-    calls = _capture_wt_subprocess(monkeypatch)
+def test_remove_streams_wt_stderr_too(monkeypatch, tmp_path, capsys):
+    calls = _capture_wt_popen(monkeypatch, stderr=b"removing\n")
 
     wt.remove(tmp_path, "some-branch")
 
-    assert calls[0]["stderr"] is None
+    assert calls[0]["stderr"] is subprocess.PIPE
     assert calls[0]["stdout"] is subprocess.PIPE
+    assert capsys.readouterr().err == "removing\n"
 
 
 def test_list_worktrees_keeps_both_streams_captured(monkeypatch, tmp_path):
@@ -127,26 +174,56 @@ def test_list_worktrees_keeps_both_streams_captured(monkeypatch, tmp_path):
 
     wt.list_worktrees(tmp_path)
 
-    assert calls[0]["stderr"] is subprocess.PIPE
-    assert calls[0]["stdout"] is subprocess.PIPE
+    assert calls[0]["capture_output"] is True
 
 
 def test_streamed_failure_raises_the_short_error_form(monkeypatch, tmp_path):
-    """With stderr streamed there is nothing captured to re-print: the
-    exception carries just the "exited N" form, the detail is already on
-    screen."""
-    monkeypatch.setattr(wt.shutil, "which", lambda _name: "/usr/bin/wt")
-
-    def fake_run(cmd, **kwargs):
-        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=None)
-
-    monkeypatch.setattr(wt.subprocess, "run", fake_run)
+    """A streamed failure's stderr already went to the screen live, so the
+    exception message stays the short "exited N" form instead of re-printing
+    it, but the tee'd text still rides along for callers to inspect."""
+    _capture_wt_popen(monkeypatch, stderr=b"boom\n", returncode=1)
 
     with pytest.raises(wt.WtCommandError) as excinfo:
         wt.switch(tmp_path, "some-branch")
 
-    assert excinfo.value.stderr is None
+    assert excinfo.value.stderr == "boom\n"
+    assert excinfo.value.streamed is True
     assert str(excinfo.value) == "wt switch --no-cd --format json some-branch exited 1"
+
+
+def test_relocate_preview_parses_the_dry_run_entries(monkeypatch, tmp_path):
+    monkeypatch.setattr(wt.shutil, "which", lambda _name: "/usr/bin/wt")
+    payload = (
+        '{"dry_run": true, "entries": [{"branch": "feature/other",'
+        ' "from": "/worktrees/review-jamie/repo", "to": "/worktrees/feature-other/repo"}], "skipped": []}'
+    )
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+
+    monkeypatch.setattr(wt.subprocess, "run", fake_run)
+
+    entries = wt.relocate_preview(tmp_path, "feature/other")
+
+    assert entries == [
+        {"branch": "feature/other", "from": "/worktrees/review-jamie/repo", "to": "/worktrees/feature-other/repo"}
+    ]
+
+
+def test_relocate_precreates_target_parents(monkeypatch, tmp_path):
+    """`git worktree move` (what `wt step relocate` shells out to) refuses a
+    target whose parent directory doesn't exist yet, so the real run must
+    create each previewed target's parent first."""
+    target = tmp_path / "worktrees" / "feature-other" / "repo"
+    calls = _capture_wt_popen(monkeypatch)
+
+    wt.relocate(tmp_path, "feature/other", [{"from": str(tmp_path / "old"), "to": str(target)}])
+
+    assert target.parent.is_dir()
+    assert calls[0]["cmd"][0] == "wt"
+    assert "relocate" in calls[0]["cmd"]
+    assert "--yes" in calls[0]["cmd"]
+    assert "feature/other" in calls[0]["cmd"]
 
 
 def test_captured_failure_still_carries_stderr(monkeypatch, tmp_path):
@@ -161,4 +238,5 @@ def test_captured_failure_still_carries_stderr(monkeypatch, tmp_path):
         wt.run(["list"], cwd=tmp_path)
 
     assert excinfo.value.stderr == "boom"
+    assert excinfo.value.streamed is False
     assert str(excinfo.value) == "boom"
