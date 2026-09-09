@@ -11,6 +11,7 @@ own config.
 from __future__ import annotations
 
 import codecs
+import io
 import json
 import os
 import shutil
@@ -20,7 +21,7 @@ import threading
 from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 
 class WtNotFoundError(RuntimeError):
@@ -106,8 +107,11 @@ def _run_streaming(cmd: list[str], wt_args: list[str], check: bool) -> subproces
 
     def _tee() -> None:
         assert proc.stderr is not None
+        # Popen's pipes are io.BufferedReader objects at runtime; the
+        # IO[Any] stubs don't expose read1, so narrow for the type checker.
+        pipe = cast(io.BufferedReader, proc.stderr)
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
-        while chunk := proc.stderr.read1(4096):
+        while chunk := pipe.read1(4096):
             chunks.append(chunk)
             if err_stream is not None:
                 err_stream.write(decoder.decode(chunk))
