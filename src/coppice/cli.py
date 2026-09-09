@@ -21,6 +21,7 @@ import re
 import shutil
 import subprocess
 import time
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Annotated, Any, NamedTuple
@@ -33,6 +34,7 @@ from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
 from coppice import confirm, gh, git, repo, shell, sizes, vscode, wt
+from coppice import park as park_mod
 
 APP_HELP = """\
 Path-based CLI for git worktrees, built on top of [bold]wt[/] (worktrunk).
@@ -161,6 +163,7 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     than complete.
     """
     worktrees = wt.list_worktrees(repo_root)
+    _enrich_parked({repo_root: worktrees}, {repo_root: park_mod.parked_at(repo_root)})
     others = [w for w in worktrees if not w.get("is_main") and not w.get("is_current")]
     if not others:
         return
@@ -514,6 +517,54 @@ def _is_dirty(entry: dict[str, Any]) -> bool:
     return any(wtree.get(k) for k in ("staged", "modified", "untracked", "deleted", "renamed"))
 
 
+def _is_parked(entry: dict[str, Any]) -> bool:
+    """Whether ENTRY's branch carries a parked mark (`cop park`), folded
+    into the entry as `parked_at` by `_enrich_parked`."""
+    return entry.get("parked_at") is not None
+
+
+def _has_follow_up(entry: dict[str, Any]) -> bool:
+    """Whether a parked ENTRY's branch head moved after the mark: follow-up
+    already happened (review comments, QA, a hotfix), so the worktree reads
+    as active again, no writes, no stale-mark cleanup job. Read-time only,
+    and it works because `sync` skips parked trees, so a parked head only
+    moves when someone actually works in it. An unknown head time (0) can't
+    disprove the mark, so it stays parked."""
+    parked_ts = entry.get("parked_at")
+    if parked_ts is None:
+        return False
+    head_ts = entry.get("commit", {}).get("timestamp") or 0
+    return bool(head_ts) and head_ts > parked_ts
+
+
+def _effectively_parked(entry: dict[str, Any]) -> bool:
+    """Whether ENTRY counts as parked right now: marked, with no follow-up
+    since. Follow-up flips a parked worktree back to active at read time."""
+    return _is_parked(entry) and not _has_follow_up(entry)
+
+
+def _parked_age_label(entry: dict[str, Any]) -> str:
+    """Compact 'how long has this been parked' label ('3d'), for `list`'s
+    parked rows and `clean --parked`'s preview."""
+    return _humanize_age(max(0.0, time.time() - entry["parked_at"]))
+
+
+def _enrich_parked(
+    worktrees_by_repo: dict[Path, list[dict[str, Any]]], parked_by_repo: dict[Path, dict[str, float]]
+) -> None:
+    """Fold each repo's parked marks into its `wt list` entries as a
+    `parked_at` unix timestamp, so every renderer and check below reads one
+    dict. The key also surfaces in `list --json` output, where consumers
+    (e.g. understory) can compare it against `commit.timestamp` themselves."""
+    for repo_root, worktrees in worktrees_by_repo.items():
+        marks = parked_by_repo.get(repo_root, {})
+        if not marks:
+            continue
+        for w in worktrees:
+            if (branch := w.get("branch")) and branch in marks:
+                w["parked_at"] = marks[branch]
+
+
 def _short_path(path: Path, max_len: int = 48) -> str:
     """Shorten PATH for a table cell: collapse the home directory to '~',
     then middle-ellipsize anything still longer than MAX_LEN, keeping the
@@ -649,9 +700,16 @@ def _worktree_cells(
     worktree looks the same wherever `coppice` shows one.
     """
     stale = _is_stale(w)
+    parked = not stale and _effectively_parked(w)
+    follow_up = not stale and _has_follow_up(w)
     branch = w.get("branch") or "?"
     if stale:
         branch_cell = f"[{_STYLE_STALE}]{indent}{branch}[/]"
+    elif parked:
+        # Parked rows render dimmed as a whole (below), so the current
+        # worktree's bold-green highlight is suppressed too: the parked mark
+        # is the stronger signal, one visual state per row.
+        branch_cell = f"{indent}{branch}"
     elif w.get("is_current"):
         branch_cell = f"[{_STYLE_CURRENT}]{indent}{branch}[/]"
     else:
@@ -665,14 +723,24 @@ def _worktree_cells(
     working_tree = "[dim]-[/]" if stale else (f"[{_STYLE_DIRTY}]dirty[/]" if _is_dirty(w) else "[dim]clean[/]")
     merge_label, merge_style = _merge_status(w)
 
+    age_cell = _age_cell(w)
+    if parked:
+        age_cell = f"{_age_label(w)} · parked {_parked_age_label(w)}"
+    elif follow_up:
+        # The mark is stale (head moved since): the row renders active
+        # again, with the note naming why a parked worktree isn't dimmed.
+        age_cell = f"{_age_label(w)} · follow-up"
+
     size_kb = _worktree_size_kb(w, size_cache) if show_size else None
-    cells = [branch_cell, _age_cell(w)]
+    cells = [branch_cell, age_cell]
     if show_size:
         cells.append(sizes.human_kb(size_kb) if size_kb is not None else "-")
     if verbose:
         path = w.get("path")
         cells.append(f"[dim]{_short_path(Path(path), max_len=40)}[/]" if path and not stale else "[dim]-[/]")
     cells += [working_tree, f"[{merge_style}]{merge_label}[/]"]
+    if parked:
+        cells = [f"[dim]{cell}[/]" for cell in cells]
     return cells, size_kb
 
 
@@ -734,12 +802,16 @@ def _list_section_heading(repo_root: Path, main_entry: dict[str, Any] | None) ->
 
 def _list_sort_key(w: dict[str, Any]) -> tuple[int, float]:
     """Worktree row order within a `list` repo section: stale (dangling)
-    references first, they always need action, then newest first (the
-    worktree you're looking for is usually a recent one), unknown ages
-    last.
+    references first, they always need action, then unparked newest first
+    (the worktree you're looking for is usually a recent one), unknown ages
+    last, and parked worktrees after all of those, most recently parked
+    first (a fresh mark is the likeliest to still see follow-up). A parked
+    worktree with follow-up counts as active again and sorts unparked.
     """
     if _is_stale(w):
         return (0, 0.0)
+    if _effectively_parked(w):
+        return (2, max(0.0, time.time() - w["parked_at"]))
     seconds = _age_seconds(w)
     return (1, seconds if seconds is not None else float("inf"))
 
@@ -913,6 +985,7 @@ def cmd_list(
         import json
 
         worktrees_by_repo = wt.list_worktrees_many(repos)
+        _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(repos))
         merged: list[dict[str, Any]] = []
         for repo_root in repos:
             for entry in worktrees_by_repo[repo_root]:
@@ -933,6 +1006,7 @@ def cmd_list(
     with console.status("[dim]Listing worktrees…[/dim]") as spinner:
         spinner.update(f"[dim]Listing worktrees for {_plural(len(repos), 'repo')}…[/dim]")
         worktrees_by_repo: dict[Path, list[dict[str, Any]]] = wt.list_worktrees_many(repos)
+        _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(repos))
 
         size_cache: dict[Path, int] | None = None
         if show_size:
@@ -1033,9 +1107,26 @@ _VSCODE_OPEN_NOTE = (
 )
 
 
-def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[dict[str, Any]]]) -> list[str] | None:
-    """fzf multi-select picker over every removable worktree in SCOPE, for
-    `coppice remove` with no BRANCH given.
+def _picker_note(w: dict[str, Any]) -> str:
+    """Default per-candidate detail for `_pick_branches_interactively`:
+    age plus dirtiness. Markup-free, fzf renders it as literal text."""
+    return f"{_age_label(w)}{', dirty' if _is_dirty(w) else ''}"
+
+
+def _pick_branches_interactively(
+    scope: list[Path],
+    candidates_by_repo: dict[Path, list[dict[str, Any]]],
+    *,
+    verb: str = "Remove",
+    adjective: str = "removable",
+    note: Callable[[dict[str, Any]], str] | None = None,
+) -> list[str] | None:
+    """fzf multi-select picker over every candidate worktree in SCOPE, for
+    the branch-taking commands (`remove`, `park`, `unpark`) when no BRANCH
+    is given and there's no current worktree to default to. VERB and
+    ADJECTIVE adapt the chrome ('Remove worktrees> ', 'no removable
+    worktrees in scope') to the calling command; NOTE builds the
+    parenthesized per-candidate detail (default: age plus dirtiness).
 
     Falls back to printing the candidates and asking for an explicit re-run
     when `fzf` isn't installed, rather than a pure-Python picker, to avoid a
@@ -1044,29 +1135,27 @@ def _pick_branches_interactively(scope: list[Path], removable: dict[Path, list[d
     Returns None (caller exits 1) when there's nothing to pick, `fzf` isn't
     installed, or the user cancels the picker.
     """
-    candidates = [(repo_root, w) for repo_root in scope for w in removable[repo_root]]
+    if note is None:
+        note = _picker_note
+    candidates = [(repo_root, w) for repo_root in scope for w in candidates_by_repo[repo_root]]
     if not candidates:
-        err.print("[red]Error:[/] no removable worktrees in scope.")
+        err.print(f"[red]Error:[/] no {adjective} worktrees in scope.")
         return None
 
     if shutil.which("fzf") is None:
         err.print("No BRANCH given and fzf isn't installed. Candidates in scope:")
         for repo_root, w in candidates:
-            suffix = " (dirty)" if _is_dirty(w) else ""
-            err.print(f"  {w['branch']}  @ {repo_root.name}{suffix}")
-        err.print("Re-run: coppice remove BRANCH [--repo PATH]")
+            err.print(f"  {w['branch']}  @ {repo_root.name}  ({note(w)})")
+        err.print(f"Re-run: coppice {verb.lower()} BRANCH [--repo PATH]")
         return None
 
     # Prefix each line with its candidate index so the pick can be mapped
     # back precisely even if two entries render an identical label (e.g.
     # the same branch name in two different repos in scope); --with-nth
     # hides that column from what fzf actually displays.
-    lines = [
-        f"{i}\t{w['branch']}  @ {repo_root.name}  ({_age_label(w)}{', dirty' if _is_dirty(w) else ''})"
-        for i, (repo_root, w) in enumerate(candidates)
-    ]
+    lines = [f"{i}\t{w['branch']}  @ {repo_root.name}  ({note(w)})" for i, (repo_root, w) in enumerate(candidates)]
     proc = subprocess.run(
-        ["fzf", "--prompt=Remove worktrees> ", "--height=~50%", "--multi", "--delimiter=\t", "--with-nth=2.."],
+        ["fzf", f"--prompt={verb} worktrees> ", "--height=~50%", "--multi", "--delimiter=\t", "--with-nth=2.."],
         input="\n".join(lines) + "\n",
         capture_output=True,
         text=True,
@@ -1214,6 +1303,7 @@ def cmd_remove(
             failures.append(branch_name)
         else:
             n_removed += 1
+            _unpark_if_branch_gone(target, branch_name)
 
     if failures:
         console.print()
@@ -1225,6 +1315,231 @@ def cmd_remove(
     console.print()
     console.print(f"Removed {_plural(n_removed, 'worktree')}.")
     console.print()
+
+
+def _unpark_if_branch_gone(repo_root: Path, branch_name: str) -> None:
+    """Drop BRANCH_NAME's parked mark when its branch went with the removed
+    worktree. `wt remove` deletes the ref directly (`update-ref -d`), which,
+    unlike `git branch -D`, leaves the `branch.<name>` config section
+    behind, so the 'the mark dies with the branch' invariant needs this
+    nudge. A kept branch keeps its mark: recreating its worktree later
+    revives the parked state, which is exactly what the mark means."""
+    if not wt.branch_exists(repo_root, branch_name):
+        park_mod.unpark(repo_root, branch_name)
+
+
+def _parkable(worktrees_by_repo: dict[Path, list[dict[str, Any]]]) -> dict[Path, list[dict[str, Any]]]:
+    """Entries a parked mark makes sense for: non-main (the main checkout is
+    the repo itself, never swept), on a branch (the mark is keyed by
+    branch), and not a stale/dangling reference (its directory is already
+    gone, there's nothing left to keep for follow-up)."""
+    return {
+        repo_root: [w for w in worktrees if not w.get("is_main") and not _is_stale(w) and w.get("branch")]
+        for repo_root, worktrees in worktrees_by_repo.items()
+    }
+
+
+def _standing_in(parkable: dict[Path, list[dict[str, Any]]]) -> tuple[Path, dict[str, Any]] | None:
+    """The (repo, entry) whose worktree directory the process is running in,
+    or None. Detected by path (`git rev-parse --show-toplevel` resolves to
+    the worktree's own root, from any subdirectory of it), not `wt list`'s
+    `is_current`: `wt` is always invoked with `-C repo_root`, so from its
+    cwd the main worktree is the current one, not the one you stand in."""
+    proc = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        return None
+    here = os.path.realpath(proc.stdout.strip())
+    for repo_root, entries in parkable.items():
+        for w in entries:
+            if w.get("path") and os.path.realpath(w["path"]) == here:
+                return repo_root, w
+    return None
+
+
+def _park_unpark(
+    branches: list[str] | None,
+    repo_path: str | None,
+    yes: bool,
+    *,
+    unpark: bool,
+) -> None:
+    """Shared implementation of `park`/`unpark`: resolve the target
+    worktrees (the current one when bare inside a worktree, an fzf picker
+    when bare outside one, explicit BRANCHes otherwise), then set/delete
+    each branch's `parked-at` config key. Parking a dirty worktree asks
+    first (dirty and complete contradict each other) unless --yes."""
+    verb = "Unpark" if unpark else "Park"
+    try:
+        scope = repo.scope_repos(repo_path)
+    except repo.RepoResolutionError as exc:
+        raise _fail(str(exc)) from exc
+
+    if not scope:
+        raise _fail("no known repos. Run 'coppice new' at least once, or pass --repo.")
+
+    try:
+        wt.require_wt()
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+
+    worktrees_by_repo = wt.list_worktrees_many(scope)
+    _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
+    parkable = _parkable(worktrees_by_repo)
+
+    targets: list[tuple[Path, dict[str, Any]]] = []
+    failures: list[str] = []
+    if not branches:
+        current = _standing_in(parkable)
+        # Bare inside a worktree: that worktree is the target (the common
+        # case, the task just finished and you're standing in it). For
+        # `park` even an already-parked one (re-parking refreshes the
+        # mark); for `unpark` only a parked one. Anything else (main
+        # checkout, no repo) falls to the picker, same as `remove`.
+        if current is not None and (not unpark or _is_parked(current[1])):
+            targets = [current]
+        else:
+            pickable = {r: [w for w in parkable[r] if _is_parked(w) == unpark] for r in scope}
+            note = (lambda w: f"parked {_parked_age_label(w)}") if unpark else None
+            branches = _pick_branches_interactively(
+                scope, pickable, verb=verb, adjective="parked" if unpark else "parkable", note=note
+            )
+            if not branches:
+                raise typer.Exit(1)
+
+    if not targets:
+        # `branches` is non-None here: bare invocation either resolved the
+        # current worktree above or went through the picker (which exits
+        # rather than returning nothing).
+        for branch_name in branches or []:
+            matches = [(r, w) for r in scope for w in parkable[r] if w["branch"] == branch_name]
+            if not matches:
+                err.print(f"[red]Error:[/] no parkable worktree for branch '{branch_name}' found in scope.")
+                failures.append(branch_name)
+                continue
+            if len(matches) > 1:
+                err.print(f"[red]Error:[/] branch '{branch_name}' exists in multiple repos, disambiguate with --repo:")
+                for r, _ in matches:
+                    err.print(f"  {_short_path(r)}")
+                failures.append(branch_name)
+                continue
+            targets.append(matches[0])
+
+    console.print()
+    if unpark:
+        # Unparking a worktree with no mark is a no-op note, not an error
+        # (unlike a branch with no worktree at all, which failed above).
+        still = []
+        for r, w in targets:
+            if _is_parked(w):
+                still.append((r, w))
+            else:
+                console.print(f"[dim]'{w['branch']}' @ {r.name} is not parked.[/]")
+        targets = still
+
+    if not targets:
+        if failures:
+            raise typer.Exit(1)
+        console.print()
+        return
+
+    if not unpark and not yes:
+        dirty = [(r, w) for r, w in targets if _is_dirty(w)]
+        if dirty:
+            console.print(f"{_plural(len(dirty), 'Worktree')} with uncommitted changes:")
+            for r, w in dirty:
+                console.print(f"  {w['branch']} @ {r.name}")
+            console.print()
+            if not confirm.ask(
+                f"Park the {_plural(len(dirty), 'worktree')} listed above? "
+                "Parking marks a worktree task-complete, and dirty and complete contradict each other."
+            ):
+                console.print()
+                console.print("Cancelled.")
+                console.print()
+                raise typer.Exit(1)
+            console.print()
+
+    for r, w in targets:
+        branch_name = w["branch"]
+        if unpark:
+            age = _parked_age_label(w)
+            park_mod.unpark(r, branch_name)
+            console.print(f"Unparked '{branch_name}' @ {r.name} (was parked {age}).")
+        else:
+            was = w.get("parked_at")
+            park_mod.park(r, branch_name)
+            if was is not None:
+                age = _humanize_age(max(0.0, time.time() - was))
+                console.print(f"Re-parked '{branch_name}' @ {r.name} (was parked {age}).")
+            else:
+                console.print(f"Parked '{branch_name}' @ {r.name}.")
+
+    if len(targets) > 1:
+        console.print(f"{verb}ed {_plural(len(targets), 'worktree')}.")
+
+    if failures:
+        console.print()
+        err.print(f"[red]{verb}ed {_plural(len(targets), 'worktree')}, {len(failures)} failed:[/]")
+        for f in failures:
+            err.print(f"  - {f}")
+        raise typer.Exit(1)
+    console.print()
+
+
+@app.command("park", rich_help_panel="Update")
+def cmd_park(
+    branches: Annotated[
+        list[str] | None,
+        typer.Argument(help="Branch name(s) to park. Omit inside a worktree to park it, or elsewhere for a picker."),
+    ] = None,
+    repo_path: Annotated[
+        str | None,
+        typer.Option(
+            "--repo",
+            "-C",
+            help="Scope to this repo. Defaults to the registry plus the repo you're standing in.",
+        ),
+    ] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip the prompt when a worktree is dirty.")] = False,
+) -> None:
+    """Mark worktrees parked: task complete, but kept on disk for follow-up
+    (review comments, QA, a hotfix).
+
+    The mark is a `branch.<branch>.parked-at` timestamp in the repo's git
+    config: it dies with the branch (so `remove` cleans it up for free) and
+    never dirties the worktree. Parked worktrees render dimmed in `list`,
+    are skipped by `sync`, and `clean --parked` sweeps the ones parked a
+    week or more ago. If the branch head moves after the mark, the worktree
+    reads as active again (a 'follow-up' note in `list`), the mark simply
+    means 'nothing new since I marked it'.
+
+    Examples:
+        coppice park                 # park the worktree you're standing in
+        coppice park feat-a feat-b   # park by branch name
+        coppice unpark feat-a        # follow-up arrived, back to active
+    """
+    _park_unpark(branches, repo_path, yes, unpark=False)
+
+
+@app.command("unpark", rich_help_panel="Update")
+def cmd_unpark(
+    branches: Annotated[
+        list[str] | None,
+        typer.Argument(help="Branch name(s) to unpark. Omit inside a parked worktree, or elsewhere for a picker."),
+    ] = None,
+    repo_path: Annotated[
+        str | None,
+        typer.Option(
+            "--repo",
+            "-C",
+            help="Scope to this repo. Defaults to the registry plus the repo you're standing in.",
+        ),
+    ] = None,
+) -> None:
+    """Delete the parked mark, returning the worktree to active: `sync`
+    merges into it again and `clean --parked` no longer sweeps it. Never
+    prompts, unparking destroys nothing."""
+    _park_unpark(branches, repo_path, True, unpark=True)
 
 
 def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
@@ -1249,7 +1564,10 @@ def _merge_label(entry: dict[str, Any], *, force_delete: bool) -> str:
 
 @app.command("clean", rich_help_panel="Remove (destructive)")
 def cmd_clean(
-    days: Annotated[int, typer.Argument(help="Remove worktrees older than this many days.")] = 14,
+    days: Annotated[
+        int | None,
+        typer.Argument(help="Remove worktrees older than this many days (default: 14; 7 with --parked)."),
+    ] = None,
     repo_path: Annotated[
         str | None,
         typer.Option(
@@ -1267,6 +1585,15 @@ def cmd_clean(
             "(still skips dirty worktrees and ones with an open PR).",
         ),
     ] = False,
+    parked: Annotated[
+        bool,
+        typer.Option(
+            "--parked",
+            "-p",
+            help="Instead sweep worktrees parked (cop park) at least DAYS days ago (default DAYS: 7), "
+            "regardless of worktree age (still skips dirty worktrees and ones with an open PR).",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", "-n", help="List candidates without removing anything.")
     ] = False,
@@ -1282,17 +1609,24 @@ def cmd_clean(
     step after 'coppice list'.
 
     Pass --merged/-m to instead remove every merged worktree in scope
-    regardless of age, DAYS is ignored in that mode.
+    regardless of age, or --parked/-p to sweep worktrees parked (cop park)
+    at least DAYS days ago (default: 7), DAYS is reinterpreted in those
+    modes. --merged and --parked are mutually exclusive.
 
     Scope is every known repo plus the repo you're standing in ("all
     repos"), same as 'coppice list'/'coppice remove' default, or restrict to
     one repo's worktrees with --repo/-C PATH ("all worktrees" in that repo).
 
     Skips: the main worktree, the current worktree, dirty worktrees, and
-    branches with an open GitHub PR (via 'gh', when installed). Reports an
-    on-disk size estimate per candidate, a total reclaimable size, and a
-    final removed/failed summary.
+    branches with an open GitHub PR (via 'gh', when installed). A parked
+    worktree whose branch head moved since the mark (follow-up arrived)
+    counts as active again and is not swept. Reports an on-disk size
+    estimate per candidate, a total reclaimable size, and a final
+    removed/failed summary.
     """
+    if merged and parked:
+        raise _fail("--merged and --parked are mutually exclusive.")
+
     try:
         scope = repo.scope_repos(repo_path)
     except repo.RepoResolutionError as exc:
@@ -1306,12 +1640,16 @@ def cmd_clean(
     except wt.WtNotFoundError as exc:
         raise _fail(str(exc)) from exc
 
+    if days is None:
+        days = 7 if parked else 14
     threshold_seconds = days * 86400
     have_gh = shutil.which("gh") is not None
 
     console.print()
     if merged:
         console.print(f"Scanning {_plural(len(scope), 'repo')} for merged worktrees (any age)...")
+    elif parked:
+        console.print(f"Scanning {_plural(len(scope), 'repo')} for worktrees parked at least {days}d ago...")
     else:
         console.print(f"Scanning {_plural(len(scope), 'repo')} for worktrees older than {days}d...")
 
@@ -1322,10 +1660,13 @@ def cmd_clean(
     # reference is pruned by path with git instead.
     candidates: list[tuple[Path, str, int, str | None]] = []
     n_worktrees = n_young = n_dirty = n_pr = n_stale = n_unmerged = 0
+    n_unparked = n_followup = 0
 
     # Fetch every repo's worktrees concurrently (one `wt` subprocess per
     # repo, overlapped rather than run one after another).
     worktrees_by_repo = wt.list_worktrees_many(scope)
+    if parked:
+        _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
 
     # Pass 1, per repo, local only (no subprocess): stale, too-young/
     # unmerged, dirty. Whatever's left after those needs an open-PR check
@@ -1401,6 +1742,33 @@ def cmd_clean(
                     n_unmerged += 1
                     if verbose:
                         lines.append(f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](not merged)[/]")
+                    continue
+            elif parked:
+                # Removable = parked at least DAYS ago. The parked age (not
+                # the worktree age) decides, so the preview shows it per
+                # row. A head newer than the mark means follow-up already
+                # happened: the worktree is active again and stays kept.
+                parked_ts = w.get("parked_at")
+                if parked_ts is None:
+                    n_unparked += 1
+                    if verbose:
+                        lines.append(f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](not parked)[/]")
+                    continue
+                if _has_follow_up(w):
+                    n_followup += 1
+                    if verbose:
+                        lines.append(
+                            f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](follow-up since it was parked)[/]"
+                        )
+                    continue
+                parked_age = time.time() - parked_ts
+                age_label = _humanize_age(parked_age)
+                if parked_age < threshold_seconds:
+                    n_young += 1
+                    if verbose:
+                        lines.append(
+                            f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](parked less than {days}d ago)[/]"
+                        )
                     continue
             else:
                 if seconds is None:
@@ -1501,6 +1869,14 @@ def cmd_clean(
             f"Scanned {_plural(len(scope), 'repo')}, {_plural(n_worktrees, 'worktree')}: {len(candidates)} removable, "
             f"{n_dirty} dirty, {n_pr} with an open PR{unmerged_note}{stale_note}."
         )
+    elif parked:
+        unparked_note = f", {n_unparked} not parked" if n_unparked else ""
+        followup_note = f", {n_followup} with follow-up" if n_followup else ""
+        console.print(
+            f"Scanned {_plural(len(scope), 'repo')}, {_plural(n_worktrees, 'worktree')}: {len(candidates)} removable, "
+            f"{n_dirty} dirty, {n_pr} with an open PR, {n_young} parked under {days}d"
+            f"{unparked_note}{followup_note}{stale_note}."
+        )
     else:
         console.print(
             f"Scanned {_plural(len(scope), 'repo')}, {_plural(n_worktrees, 'worktree')}: {len(candidates)} removable, "
@@ -1549,6 +1925,7 @@ def cmd_clean(
                 wt.prune_stale(repo_root, prune_path)
             else:
                 wt.remove(repo_root, name, yes=True, force_delete=force_delete)
+                _unpark_if_branch_gone(repo_root, name)
         except (wt.WtNotFoundError, wt.WtCommandError) as exc:
             err.print(f"[red]Error:[/] {exc}")
             failed.append(f"{name} @ {repo_root.name}")
@@ -1691,7 +2068,9 @@ def cmd_sync(
     main worktree's checkout of the base branch when clean (--no-main
     skips), then merges origin/<base> into every eligible worktree branch.
 
-    Skips dirty worktrees, stale (dangling) references, and detached HEADs.
+    Skips dirty worktrees, parked worktrees (cop park, nothing to merge
+    into a task-complete tree; unpark first to sync it again), stale
+    (dangling) references, and detached HEADs.
     Worktrees whose merge would conflict are predicted with `git merge-tree`
     and left untouched, reported as conflicts, so a worktree is never left
     half-merged. Never prompts: syncing only adds merge commits to clean
@@ -1719,6 +2098,7 @@ def cmd_sync(
         raise _fail(str(exc)) from exc
 
     worktrees_by_repo = wt.list_worktrees_many(scope)
+    _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
 
     # An explicit BRANCH filter must name real managed worktrees; a typo'd
     # name failing the whole run is safe (sync is idempotent, just re-run).
@@ -1847,6 +2227,14 @@ def cmd_sync(
             if not branch_name:
                 n_skipped += 1
                 rows.append(_sync_row("skip", "yellow", "?", "detached HEAD, no branch to merge into"))
+                continue
+            if _is_parked(w):
+                # Nothing to merge into a task-complete tree, and skipping
+                # cuts the conflict surface of a sync run. Dim (an expected
+                # state, not a problem), so it stays out of 'Needs
+                # attention'. Follow-up instead: 'cop unpark', then sync.
+                n_skipped += 1
+                rows.append(_sync_row("skip", "dim", branch_name, "parked; 'cop unpark' to sync it again"))
                 continue
             if _is_dirty(w):
                 n_skipped += 1

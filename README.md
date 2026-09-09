@@ -281,6 +281,20 @@ Three states `cop list`/`cop clean` report on and act on differently:
   (removed outside `coppice`/`wt`) but git still has a record of it.
   `clean` always removes these, regardless of age or the `--merged` flag.
 
+There's also a fourth, opt-in state: **parked** (`cop park`), for a
+worktree whose task is complete but which stays on disk in case follow-up
+arrives (review comments, QA, a hotfix). The states above are git state;
+parked is *task* state. The mark is a `branch.<branch>.parked-at`
+timestamp in the repo's git config: it dies with the branch (so `remove`
+cleans it up) and never dirties the worktree. Parked worktrees render
+dimmed in `cop list` with a `parked Nd` label and sort after live ones,
+`cop sync` skips them (nothing to merge into a task-complete tree), and
+`cop clean --parked` sweeps the ones parked a week or more ago. The mark
+means "nothing new since I marked it": if the branch head moves after the
+mark, the worktree reads as active again with a `follow-up` note in
+`cop list`, no cleanup job needed. Follow-up arrived? `cop unpark`, then
+sync.
+
 The Merge column in `cop list` (and `cop clean`'s preview labels) buckets
 `wt`'s `main_state` into `merged` (nothing to integrate, safe to remove),
 `unmerged` (has commits main doesn't, merges cleanly), `conflict` (has
@@ -416,6 +430,9 @@ cop sync --dry-run                       # preview what would be merged, changin
 cop sync feat-a feat-b                   # ...just these branches' worktrees
 cop sync --repo ~/dbt-models             # ...scoped to one repo
 cop sync --no-main                       # leave the main worktree's own checkout of the base branch alone
+cop park                                 # mark the current worktree's branch parked (task complete, kept for follow-up)
+cop park feat-a feat-b                   # ...or park by branch name
+cop unpark feat-a                         # follow-up arrived: back to active (sync merges into it again)
 cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
 cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)
@@ -428,6 +445,8 @@ cop remove                               # ...or omit the branch for an fzf mult
 cop clean --dry-run                      # preview worktrees (not branches) older than 14 days, size + merge status
 cop clean --yes                          # remove them (skips dirty worktrees and ones with an open PR)
 cop clean --merged                       # sweep every worktree on a merged branch instead, regardless of age
+cop clean --parked                       # sweep worktrees parked 7+ days ago (same dirty/open-PR safety rails)
+cop clean 3 --parked --dry-run           # preview worktrees parked 3+ days ago
 cop clean 7 --repo dbt-models --merged   # ...scoped to one repo, merged only
 cop status                               # is wt on PATH, table of the shared registry (worktree count, size, health)
 ```
