@@ -357,8 +357,9 @@ def _stub_git_switch(monkeypatch) -> list[dict[str, Any]]:
     monkeypatch.setattr(
         git,
         "switch_in_place",
-        lambda path, branch, **kwargs: git_calls.append({"path": path, "branch": branch, **kwargs})
-        or f"Switched to branch '{branch}'",
+        lambda path, branch, **kwargs: (
+            git_calls.append({"path": path, "branch": branch, **kwargs}) or f"Switched to branch '{branch}'"
+        ),
     )
     return git_calls
 
@@ -381,9 +382,7 @@ def test_new_recovers_an_occupied_worktree_path(tmp_path, monkeypatch):
     result = runner.invoke(app, ["new", str(repo_dir), "--branch", "review-jamie", "--yes"], input="y")
 
     assert result.exit_code == 0, result.output
-    assert git_calls == [
-        {"path": Path(occupier["path"]), "branch": "review-jamie", "create": False, "base": None}
-    ]
+    assert git_calls == [{"path": Path(occupier["path"]), "branch": "review-jamie", "create": False, "base": None}]
     assert len(switch_calls) == 2
     assert switch_calls[1].get("create", False) is False
     assert "dirty" in result.output
@@ -433,9 +432,7 @@ def test_new_occupied_path_recovery_creates_the_branch_when_creating(tmp_path, m
     result = runner.invoke(app, ["new", str(repo_dir), "--branch", "review-jamie"], input="y")
 
     assert result.exit_code == 0, result.output
-    assert git_calls == [
-        {"path": Path(occupier["path"]), "branch": "review-jamie", "create": True, "base": "master"}
-    ]
+    assert git_calls == [{"path": Path(occupier["path"]), "branch": "review-jamie", "create": True, "base": "master"}]
     assert switch_calls[0]["create"] is True
     assert switch_calls[0]["base"] == "master"
     assert len(switch_calls) == 2
