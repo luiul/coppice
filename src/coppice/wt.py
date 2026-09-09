@@ -24,13 +24,19 @@ class WtNotFoundError(RuntimeError):
 
 
 class WtCommandError(RuntimeError):
-    """A `wt` invocation failed; carries its stderr."""
+    """A `wt` invocation failed; carries its stderr, when it was captured.
 
-    def __init__(self, args: list[str], returncode: int, stderr: str) -> None:
+    stderr is None for invocations run with stream=True: their stderr went
+    straight to the terminal, so the detail is already on screen by the
+    time this raises and the message falls back to the short "exited N"
+    form instead of re-printing anything.
+    """
+
+    def __init__(self, args: list[str], returncode: int, stderr: str | None) -> None:
         self.wt_args = args
         self.returncode = returncode
         self.stderr = stderr
-        super().__init__(stderr.strip() or f"wt {' '.join(args)} exited {returncode}")
+        super().__init__((stderr or "").strip() or f"wt {' '.join(args)} exited {returncode}")
 
 
 def require_wt() -> str:
@@ -44,6 +50,7 @@ def run(
     args: list[str],
     cwd: Path | None = None,
     check: bool = True,
+    stream: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     require_wt()
     cmd = ["wt"]
@@ -51,7 +58,19 @@ def run(
         cmd += ["-C", str(cwd)]
     cmd += args
     # env is left unset: the child inherits this process's environment as-is.
-    proc = subprocess.run(cmd, capture_output=True, text=True)
+    # stream=True hands the child this process's stderr instead of a pipe.
+    # stderr is `wt`'s human channel (hook progress, status lines, config
+    # warnings), and the mutating commands should show it live: a slow
+    # pre-switch fetch under `cop new` otherwise looks like a hang, and a
+    # config typo's warning would stay invisible forever. stdout stays
+    # piped either way, it carries the JSON we parse. The machine-read,
+    # parallelized list path keeps both streams captured (stream=False).
+    proc = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=None if stream else subprocess.PIPE,
+        text=True,
+    )
     if check and proc.returncode != 0:
         raise WtCommandError(args, proc.returncode, proc.stderr)
     return proc
@@ -142,7 +161,7 @@ def switch(
     if base is not None:
         args += ["--base", base]
     args += ["--no-cd", "--format", "json", branch]
-    proc = run(args, cwd=repo)
+    proc = run(args, cwd=repo, stream=True)
     return _load_json(proc.stdout)
 
 
@@ -170,4 +189,4 @@ def remove(repo: Path, branch: str, *, yes: bool = True, force: bool = False, fo
         args.append("-f")
     if force_delete:
         args.append("-D")
-    run(args, cwd=repo)
+    run(args, cwd=repo, stream=True)

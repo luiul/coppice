@@ -964,11 +964,11 @@ def cmd_remove(
     entirely for an fzf multi-select picker scoped the same way.
 
     Asks for confirmation before removing anything, unless --yes/-y is
-    passed. This prompt is coppice's own, not `wt remove`'s: `wt` is run
-    with its stdout/stderr captured, so it treats the call as
-    non-interactive and skips its own approval prompt, `-y` and all,
-    instead of blocking on it. Relying on `wt` to ask would silently remove
-    worktrees with no confirmation at all.
+    passed. This prompt is coppice's own, not `wt remove`'s: `wt` is always
+    invoked with `-y`, so it never asks anything itself, and confirmation
+    stays in one place, asked once up front for the whole batch. During
+    each removal `wt`'s stderr streams live to the terminal (progress,
+    hook output); only its stdout stays captured.
     """
     try:
         scope = repo.scope_repos(repo_path)

@@ -7,6 +7,8 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from coppice import wt
 
 
@@ -95,3 +97,68 @@ def test_switch_lets_the_wt_subprocess_inherit_the_environment(monkeypatch, tmp_
     wt.switch(tmp_path, "some-branch")
 
     assert "env" not in calls[0]
+
+
+def test_switch_streams_wt_stderr_but_pipes_stdout_for_json(monkeypatch, tmp_path):
+    """stderr is `wt`'s human channel (hook progress, status lines, config
+    warnings): the mutating commands let it through to the terminal live.
+    stdout stays piped, it carries the JSON `switch` parses."""
+    calls = _capture_wt_subprocess(monkeypatch)
+
+    wt.switch(tmp_path, "some-branch")
+
+    assert calls[0]["stderr"] is None
+    assert calls[0]["stdout"] is subprocess.PIPE
+
+
+def test_remove_streams_wt_stderr_too(monkeypatch, tmp_path):
+    calls = _capture_wt_subprocess(monkeypatch)
+
+    wt.remove(tmp_path, "some-branch")
+
+    assert calls[0]["stderr"] is None
+    assert calls[0]["stdout"] is subprocess.PIPE
+
+
+def test_list_worktrees_keeps_both_streams_captured(monkeypatch, tmp_path):
+    """The machine-parsed, parallelized list path never streams: concurrent
+    `wt` children would interleave on the shared terminal."""
+    calls = _capture_wt_subprocess(monkeypatch)
+
+    wt.list_worktrees(tmp_path)
+
+    assert calls[0]["stderr"] is subprocess.PIPE
+    assert calls[0]["stdout"] is subprocess.PIPE
+
+
+def test_streamed_failure_raises_the_short_error_form(monkeypatch, tmp_path):
+    """With stderr streamed there is nothing captured to re-print: the
+    exception carries just the "exited N" form, the detail is already on
+    screen."""
+    monkeypatch.setattr(wt.shutil, "which", lambda _name: "/usr/bin/wt")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr=None)
+
+    monkeypatch.setattr(wt.subprocess, "run", fake_run)
+
+    with pytest.raises(wt.WtCommandError) as excinfo:
+        wt.switch(tmp_path, "some-branch")
+
+    assert excinfo.value.stderr is None
+    assert str(excinfo.value) == "wt switch --no-cd --format json some-branch exited 1"
+
+
+def test_captured_failure_still_carries_stderr(monkeypatch, tmp_path):
+    monkeypatch.setattr(wt.shutil, "which", lambda _name: "/usr/bin/wt")
+
+    def fake_run(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
+
+    monkeypatch.setattr(wt.subprocess, "run", fake_run)
+
+    with pytest.raises(wt.WtCommandError) as excinfo:
+        wt.run(["list"], cwd=tmp_path)
+
+    assert excinfo.value.stderr == "boom"
+    assert str(excinfo.value) == "boom"
