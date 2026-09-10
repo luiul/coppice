@@ -287,7 +287,7 @@ arrives (review comments, QA, a hotfix). The states above are git state;
 parked is *task* state. The mark is a `branch.<branch>.parked-at`
 timestamp in the repo's git config: it dies with the branch (so `remove`
 cleans it up) and never dirties the worktree. Parked worktrees render
-dimmed in `cop list` with a `parked Nd` label and sort after live ones,
+dimmed in `cop list` with a blue `parked Nd` label and sort after live ones,
 `cop sync` skips them (nothing to merge into a task-complete tree), and
 `cop clean --parked` sweeps the ones parked a week or more ago. The mark
 means "nothing new since I marked it": if the branch head moves after the

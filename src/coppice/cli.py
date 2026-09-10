@@ -133,6 +133,10 @@ _STYLE_DIRTY = "yellow"
 _STYLE_STALE = "bold red"
 _STYLE_CURRENT = "bold green"
 _STYLE_MISMATCH = "magenta"
+# The parked label stays blue inside the otherwise-dimmed parked row: the
+# mark is the row's one visual signal, and dimming it away with the rest
+# made parked rows indistinguishable from merely inactive ones.
+_STYLE_PARKED = "blue"
 
 # Output spacing convention: one blank line before a command's first output
 # line and one after its last (breathing room against the shell prompt on
@@ -760,7 +764,10 @@ def _worktree_cells(
 
     age_cell = _age_cell(w)
     if parked:
-        age_cell = f"{_age_label(w)} · parked {_parked_age_label(w)}"
+        # The age part dims with the rest of the row (below); the parked
+        # label itself stays bright (_STYLE_PARKED), so the one signal a
+        # parked row exists to show survives the dimming.
+        age_cell = f"[dim]{_age_label(w)}[/] · [{_STYLE_PARKED}]parked {_parked_age_label(w)}[/]"
     elif follow_up:
         # The mark is stale (head moved since): the row renders active
         # again, with the note naming why a parked worktree isn't dimmed.
@@ -775,7 +782,10 @@ def _worktree_cells(
         cells.append(f"[dim]{_short_path(Path(path), max_len=40)}[/]" if path and not stale else "[dim]-[/]")
     cells += [working_tree, f"[{merge_style}]{merge_label}[/]"]
     if parked:
-        cells = [f"[dim]{cell}[/]" for cell in cells]
+        # Every cell dims except the age one (index 1 by construction
+        # above): it carries the bright parked label and dims only its
+        # age part itself.
+        cells = [age_cell if i == 1 else f"[dim]{cell}[/]" for i, cell in enumerate(cells)]
     return cells, size_kb
 
 
