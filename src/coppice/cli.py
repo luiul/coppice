@@ -23,6 +23,7 @@ import subprocess
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import suppress
 from pathlib import Path
 from typing import Annotated, Any, NamedTuple
 
@@ -252,6 +253,8 @@ def cmd_new(
     # already exists.
     if create and base is None:
         base = repo.default_branch(repo_root)
+    elif create and base is not None:
+        _freshen_explicit_base(repo_root, base)
 
     try:
         result = _switch_with_recovery(repo_root, branch, create=create, base=base)
@@ -290,6 +293,38 @@ def cmd_new(
 
     if result_path:
         shell.write_cd_file(Path(result_path))
+
+
+def _freshen_explicit_base(repo_root: Path, base: str) -> None:
+    """Best-effort fetch of an explicit --base from its remote, so the fork
+    starts from BASE's current tip rather than a stale remote-tracking ref.
+
+    `wt switch --create --base X` forks from X's *remote-tracking* ref as it
+    stands locally right now; wt never fetches it first. The worktrunk
+    pre-switch hook only freshens the *default* branch, the fork base is
+    not exposed to pre-switch hooks (there, `base` means the worktree being
+    switched *from*), so a non-default --base would silently fork from
+    wherever origin/X last was. The default branch stays the hook's job
+    (fetching it here too would double the network round trip on every
+    `new`); only an explicit --base lands here.
+
+    Best-effort like the hook's `|| true`: a flaky/offline fetch, or a BASE
+    naming a ref its remote doesn't have (a local-only branch, a SHA, one
+    of `wt`'s own shortcuts), must never block creating the worktree,
+    forking from the local refs as they stand is the same behavior `new`
+    had before this fetch existed. A `remote/branch` BASE that origin
+    rejects gets one retry against its own remote (`origin/develop` fetches
+    `develop` from `origin`).
+    """
+    try:
+        git.fetch_base(repo_root, base)
+        return
+    except git.GitError:
+        pass
+    remote, sep, branch = base.partition("/")
+    if sep and remote and branch:
+        with suppress(git.GitError):
+            git.fetch_base(repo_root, branch, remote=remote)
 
 
 def _switch_with_recovery(repo_root: Path, branch: str, *, create: bool, base: str | None) -> dict[str, Any]:

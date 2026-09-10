@@ -30,11 +30,11 @@ def _git(args: list[str], cwd: Path, check: bool = True) -> subprocess.Completed
     return proc
 
 
-def fetch_base(repo: Path, base: str) -> None:
-    """Fetch BASE from origin, updating the origin/BASE remote-tracking ref
+def fetch_base(repo: Path, base: str, *, remote: str = "origin") -> None:
+    """Fetch BASE from REMOTE, updating the REMOTE/BASE remote-tracking ref
     (opportunistic update: the fetched branch is stored under
-    refs/remotes/origin/ per the standard fetch refspec)."""
-    _git(["fetch", "origin", base], cwd=repo)
+    refs/remotes/REMOTE/ per the standard fetch refspec)."""
+    _git(["fetch", remote, base], cwd=repo)
 
 
 def is_ancestor(cwd: Path, ancestor: str, descendant: str) -> bool:

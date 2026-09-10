@@ -64,6 +64,21 @@ def test_fetch_base_updates_the_remote_tracking_ref(tmp_path):
     assert git.commits_between(repo_dir, "main", "origin/main") == 1
 
 
+def test_fetch_base_from_a_named_remote(tmp_path):
+    """REMOTE is selectable: `new`'s explicit --base freshening retries a
+    'remote/branch' base against its own remote, which needn't be origin."""
+    repo_dir, origin = _init_with_origin(tmp_path)
+    _git(repo_dir, "remote", "add", "upstream", str(origin))
+    _git(repo_dir, "fetch", "-q", "upstream")
+    _advance_origin(origin, tmp_path)
+
+    git.fetch_base(repo_dir, "main", remote="upstream")
+
+    assert git.commits_between(repo_dir, "main", "upstream/main") == 1
+    # origin's tracking ref was never fetched, so it stays stale.
+    assert git.is_ancestor(repo_dir, "origin/main", "main")
+
+
 def test_is_ancestor_raises_on_unknown_ref(tmp_path):
     repo_dir, _origin = _init_with_origin(tmp_path)
     with pytest.raises(git.GitError):

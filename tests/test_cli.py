@@ -235,6 +235,110 @@ def test_new_explicit_base_wins_over_the_resolved_default_branch(tmp_path, monke
     assert switch_calls[0]["base"] == "develop"
 
 
+def test_new_fetches_an_explicit_base_before_creating(tmp_path, monkeypatch):
+    """`wt switch --create --base X` forks from X's remote-tracking ref as
+    it stands locally, wt never fetches it first, and the worktrunk
+    pre-switch hook only freshens the *default* branch (wt doesn't expose
+    the fork base to pre-switch hooks), so an explicit --base needs this
+    fetch to avoid forking from a stale origin/X.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+    fetches: list[tuple] = []
+    monkeypatch.setattr(git, "fetch_base", lambda *args, **kwargs: fetches.append((args, kwargs)))
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--base", "develop"])
+
+    assert result.exit_code == 0, result.output
+    assert fetches == [((switch_calls[0]["repo"], "develop"), {})]
+
+
+def test_new_leaves_the_default_base_fetch_to_the_pre_switch_hook(tmp_path, monkeypatch):
+    """When --base is omitted (base = the repo's resolved default branch),
+    `new` must not fetch it itself: the worktrunk pre-switch hook already
+    fetch --prunes + fast-forwards the default branch, so fetching here too
+    would double the network round trip on every `new`.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    _stub_switch(monkeypatch, branch_exists=False)
+    monkeypatch.setattr(repo, "default_branch", lambda _repo: "master")
+    fetches: list[tuple] = []
+    monkeypatch.setattr(git, "fetch_base", lambda *args, **kwargs: fetches.append((args, kwargs)))
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0, result.output
+    assert fetches == []
+
+
+def test_new_tolerates_a_failed_base_fetch(tmp_path, monkeypatch):
+    """The explicit-base fetch is best-effort (the hook's `|| true` spirit):
+    an offline/flaky remote, or a --base naming a ref its remote doesn't
+    have (a local-only branch, a SHA, one of wt's own shortcuts), must not
+    block creating the worktree.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+
+    def _boom(*args, **kwargs):
+        raise git.GitError(["fetch"], 128, "offline")
+
+    monkeypatch.setattr(git, "fetch_base", _boom)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--base", "develop"])
+
+    assert result.exit_code == 0, result.output
+    assert switch_calls[0]["base"] == "develop"
+
+
+def test_new_retries_a_remote_qualified_base_on_its_own_remote(tmp_path, monkeypatch):
+    """`--base origin/develop`: fetching the literal 'origin/develop' from
+    origin fails (no such branch there), so it retries as 'develop' fetched
+    from the remote 'origin'.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    _stub_switch(monkeypatch, branch_exists=False)
+    calls: list[tuple] = []
+
+    def _fake_fetch(_repo, base, *, remote="origin"):
+        calls.append((base, remote))
+        if "/" in base:
+            raise git.GitError(["fetch"], 128, "couldn't find remote ref")
+
+    monkeypatch.setattr(git, "fetch_base", _fake_fetch)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--base", "origin/develop"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [("origin/develop", "origin"), ("develop", "origin")]
+
+
+def test_new_does_not_fetch_any_base_when_reusing(tmp_path, monkeypatch):
+    """`--base` is meaningless when the branch already exists (wt warns +
+    ignores it), so nothing about it may be fetched either.
+    """
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=True)
+    fetches: list[tuple] = []
+    monkeypatch.setattr(git, "fetch_base", lambda *args, **kwargs: fetches.append((args, kwargs)))
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "existing-branch", "--base", "develop", "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert fetches == []
+    assert switch_calls[0]["create"] is False
+
+
 def test_new_skips_default_branch_resolution_when_reusing(tmp_path, monkeypatch):
     """`--base` is meaningless (and `wt` warns + ignores it) when switching
     to a branch that already exists, so `cmd_new` shouldn't even bother
