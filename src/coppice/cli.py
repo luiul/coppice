@@ -1448,7 +1448,19 @@ def _park_unpark(
         for branch_name in branches or []:
             matches = [(r, w) for r in scope for w in parkable[r] if w["branch"] == branch_name]
             if not matches:
-                err.print(f"[red]Error:[/] no parkable worktree for branch '{branch_name}' found in scope.")
+                # Fall back to the worktree's directory name (the path's
+                # basename, what `ls` of the worktrees dir shows): it's
+                # often the name you actually see and type, especially
+                # when it differs from a long branch name. Branch matches
+                # always win on a collision, the mark is keyed by branch,
+                # so the branch reading is the canonical one.
+                matches = [
+                    (r, w) for r in scope for w in parkable[r] if w.get("path") and Path(w["path"]).name == branch_name
+                ]
+            if not matches:
+                err.print(
+                    f"[red]Error:[/] no parkable worktree for branch or directory '{branch_name}' found in scope."
+                )
                 failures.append(branch_name)
                 continue
             if len(matches) > 1:
@@ -1525,7 +1537,10 @@ def _park_unpark(
 def cmd_park(
     branches: Annotated[
         list[str] | None,
-        typer.Argument(help="Branch name(s) to park. Omit inside a worktree to park it, or elsewhere for a picker."),
+        typer.Argument(
+            help="Branch name(s) to park (a worktree's directory name works too). "
+            "Omit inside a worktree to park it, or elsewhere for a picker."
+        ),
     ] = None,
     repo_path: Annotated[
         str | None,
@@ -1550,7 +1565,7 @@ def cmd_park(
 
     Examples:
         coppice park                 # park the worktree you're standing in
-        coppice park feat-a feat-b   # park by branch name
+        coppice park feat-a feat-b   # park by branch name (or worktree directory name)
         coppice unpark feat-a        # follow-up arrived, back to active
     """
     _park_unpark(branches, repo_path, yes, unpark=False)
@@ -1560,7 +1575,10 @@ def cmd_park(
 def cmd_unpark(
     branches: Annotated[
         list[str] | None,
-        typer.Argument(help="Branch name(s) to unpark. Omit inside a parked worktree, or elsewhere for a picker."),
+        typer.Argument(
+            help="Branch name(s) to unpark (a worktree's directory name works too). "
+            "Omit inside a parked worktree, or elsewhere for a picker."
+        ),
     ] = None,
     repo_path: Annotated[
         str | None,

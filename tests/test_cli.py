@@ -1469,7 +1469,7 @@ def test_park_unknown_branch_fails(tmp_path, monkeypatch):
     result = runner.invoke(app, ["park", "nope", "--repo", str(repo_dir)])
 
     assert result.exit_code != 0
-    assert "no parkable worktree for branch 'nope'" in result.output
+    assert "no parkable worktree for branch or directory 'nope'" in result.output
 
 
 def test_park_stale_entry_is_not_parkable(tmp_path, monkeypatch):
@@ -1483,7 +1483,72 @@ def test_park_stale_entry_is_not_parkable(tmp_path, monkeypatch):
     result = runner.invoke(app, ["park", "gone", "--repo", str(repo_dir)])
 
     assert result.exit_code != 0
-    assert "no parkable worktree for branch 'gone'" in result.output
+    assert "no parkable worktree for branch or directory 'gone'" in result.output
+
+
+def test_park_by_worktree_directory_name(tmp_path, monkeypatch):
+    """The worktree's directory name (its path's basename, what `ls` of the
+    worktrees dir shows) resolves too, not just the branch name: it's often
+    the name you actually see and type when the two differ (e.g. a long
+    'feature/ISA-123-...' branch behind a short directory)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("feature/long-branch-name", tmp_path / "isa-orch")]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["park", "isa-orch", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "Parked 'feature/long-branch-name' @ repo." in result.output
+    assert set(park.parked_at(repo_dir)) == {"feature/long-branch-name"}
+
+
+def test_park_directory_fallback_still_skips_stale_entries(tmp_path, monkeypatch):
+    """The directory-name fallback searches only parkable entries, the same
+    set a branch name searches: a stale entry's directory is already gone,
+    so its name resolves to nothing."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("gone", tmp_path / "gone-dir", stale=True)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["park", "gone-dir", "--repo", str(repo_dir)])
+
+    assert result.exit_code != 0
+    assert "no parkable worktree for branch or directory 'gone-dir'" in result.output
+
+
+def test_park_branch_match_wins_over_a_directory_name(tmp_path, monkeypatch):
+    """On a collision between one worktree's branch name and another's
+    directory name, the branch wins: the mark is keyed by branch, so the
+    branch reading is the canonical one."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("feat-a", tmp_path / "shared"),
+        _entry("shared", tmp_path / "other"),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["park", "shared", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "Parked 'shared' @ repo." in result.output
+    assert set(park.parked_at(repo_dir)) == {"shared"}
+
+
+def test_unpark_by_worktree_directory_name(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("feature/long-branch-name", tmp_path / "isa-orch")]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    park.park(repo_dir, "feature/long-branch-name", at=1_000_000_000.0)
+
+    result = runner.invoke(app, ["unpark", "isa-orch", "--repo", str(repo_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "Unparked 'feature/long-branch-name' @ repo" in result.output
+    assert park.parked_at(repo_dir) == {}
 
 
 def test_unpark_removes_the_mark(tmp_path, monkeypatch):

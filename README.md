@@ -431,7 +431,7 @@ cop sync feat-a feat-b                   # ...just these branches' worktrees
 cop sync --repo ~/dbt-models             # ...scoped to one repo
 cop sync --no-main                       # leave the main worktree's own checkout of the base branch alone
 cop park                                 # mark the current worktree's branch parked (task complete, kept for follow-up)
-cop park feat-a feat-b                   # ...or park by branch name
+cop park feat-a feat-b                   # ...or park by branch name (a worktree's directory name works too)
 cop unpark feat-a                         # follow-up arrived: back to active (sync merges into it again)
 cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
