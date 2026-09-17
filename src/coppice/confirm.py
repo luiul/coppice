@@ -11,6 +11,11 @@ adapted for a one-shot CLI.
   capitalized letter is the default answer, and enter selects it.
   Swallowing everything else means no answer can land by accident, the
   prompt keeps waiting for a key that means something.
+- `choose` is the multi-key variant for prompts offering more than one
+  remedy (`new`'s occupied-path recovery): one letter per option, and
+  every key that isn't an option (enter, esc, `n`, EOF, anything) cancels.
+  Where `ask` swallows unknown keys, `choose` resolves them all to the
+  safe outcome: nothing happens.
 - One keypress is the whole answer, no enter after the `y`. That is the
   point of reading the terminal in cbreak mode instead of line-buffered
   (`typer.confirm` reads a line, so it cannot do this).
@@ -24,8 +29,8 @@ rows keep repolling and reordering under an open prompt; a one-shot CLI
 prompt has nothing moving underneath it, so a timeout would only surprise.
 
 `_read_key` is a module-level function so tests can swap it out and drive
-`ask` with synthetic keys, the same convention the rest of the repo uses
-for external calls (see tests/test_confirm.py). Where termios is missing
+`ask` and `choose` with synthetic keys, the same convention the rest of
+the repo uses for external calls (see tests/test_confirm.py). Where termios is missing
 (Windows) or stdin is not a terminal (a pipe, a test harness), reading
 degrades to plain buffered reads: the prompt still works there, it just
 wants an enter again.
@@ -158,4 +163,42 @@ def ask(question: str, *, tier: Tier = "plain") -> bool:
             break
 
     console.print("y" if answer else "n")
+    return answer
+
+
+def choose(question: str, options: str, *, tier: Tier = "plain") -> str | None:
+    """Ask QUESTION with one-key OPTIONS (e.g. \"sr\"), returning the chosen
+    letter (lowercased), or None when the prompt is cancelled.
+
+    Unlike `ask`, every key resolves the prompt: an option letter selects
+    that option, and anything else (enter, esc, `n`, an unlisted key, a
+    whole escape sequence, EOF) cancels. Swallowing unknown keys would be
+    wrong here: with two real remedies on the table, a stray keypress must
+    resolve to the safe outcome (nothing happens), not hold the prompt
+    open. ctrl+c still quits rather than cancelling.
+
+    The ` [<options>/N] ` suffix is added here (` [s/r/N] ` for \"sr\") so
+    every prompt shows its options plus the capitalized cancel default
+    identically. The resolved answer is echoed after the prompt (the
+    letter, or `n` on cancel), the same transcript convention `ask`
+    follows.
+    """
+    style = _TIER_STYLES[tier]
+    text = f"[{style}]{question}[/]" if style else question
+    hint = "/".join(options)
+    console.print(f"{text} [dim]\\[{hint}/N][/] ", end="")
+
+    context = _cbreak() if _HAVE_TERMIOS and sys.stdin.isatty() else nullcontext()
+    with context:
+        try:
+            key = _read_key()
+        except KeyboardInterrupt:
+            # ctrl+c quits, it does not cancel (same as `ask`). The newline
+            # keeps the next shell prompt off the prompt line, since cbreak
+            # mode swallowed the terminal's own "^C" echo.
+            console.print()
+            raise
+
+    answer = key.lower() if len(key) == 1 and key.lower() in options else None
+    console.print(answer if answer is not None else "n")
     return answer

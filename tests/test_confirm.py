@@ -108,6 +108,54 @@ def test_color_tiers(output, monkeypatch):
             assert f"\x1b[{code}m" in text
 
 
+def test_choose_returns_the_pressed_option(output, monkeypatch):
+    """One keypress picks the remedy, no enter after it, and the resolved
+    letter is echoed (cbreak reads echo nothing themselves)."""
+    _script(monkeypatch, ["s"])
+    assert confirm.choose("Switch in place, or relocate?", "sr") == "s"
+    assert output.getvalue().endswith("s\n")
+
+
+def test_choose_accepts_a_capital_letter(output, monkeypatch):
+    _script(monkeypatch, ["R"])
+    assert confirm.choose("Q?", "sr") == "r"
+
+
+@pytest.mark.parametrize("key", ["n", "N", "\r", "\n", "\x1b", "", "y", " ", "\x1b[A"])
+def test_choose_cancels_on_anything_but_an_option(output, monkeypatch, key):
+    """enter, esc, `n`, EOF, an unlisted key, a whole escape sequence:
+    everything that isn't an option cancels, echoing the `n` it resolved
+    to. Unlike `ask` (which swallows unknown keys and keeps waiting), a
+    stray keypress here resolves to the safe outcome: nothing happens."""
+    _script(monkeypatch, [key])
+    assert confirm.choose("Q?", "sr") is None
+    assert output.getvalue().endswith("n\n")
+
+
+def test_choose_ctrl_c_quits_rather_than_cancelling(output, monkeypatch):
+    """ctrl+c propagates as KeyboardInterrupt (typer turns it into exit
+    130): a quit, not a silent cancel that could be mistaken for an
+    answer."""
+
+    def _interrupted() -> str:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(confirm, "_read_key", _interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        confirm.choose("Q?", "sr")
+    # a newline keeps the next shell prompt off the prompt line
+    assert output.getvalue().endswith("\n")
+
+
+def test_choose_suffix_lists_the_options_and_the_cancel_default(output, monkeypatch):
+    """Every multi-key prompt ends in ` [<options>/N] `, added here so no
+    caller can forget the capitalized cancel default the enter key
+    selects."""
+    _script(monkeypatch, ["s"])
+    confirm.choose("Switch in place, or relocate?", "sr")
+    assert "Switch in place, or relocate? [s/r/N] " in _ANSI.sub("", output.getvalue())
+
+
 class _FakeTtyStdin:
     """A tty-flavored stdin stand-in for `_read_key`'s terminal path:
     `isatty` true and a dummy `fileno`, while the low-level byte readers
