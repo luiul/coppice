@@ -289,7 +289,10 @@ timestamp in the repo's git config: it dies with the branch (so `remove`
 cleans it up) and never dirties the worktree. Parked worktrees render
 dimmed in `cop list` with a blue `parked Nd` label and sort after live ones,
 `cop sync` skips them (nothing to merge into a task-complete tree), and
-`cop clean --parked` sweeps the ones parked a week or more ago. The mark
+`cop remove` and `cop clean` refuse them: a parked worktree is kept for
+follow-up, so removing one needs a `cop unpark` first. The sweep path for
+parked worktrees is `cop clean --parked`, which removes the ones parked a
+week or more ago. The mark
 means "nothing new since I marked it": if the branch head moves after the
 mark, the worktree reads as active again with a `follow-up` note in
 `cop list`, no cleanup job needed. Follow-up arrived? `cop unpark`, then
@@ -439,11 +442,11 @@ cop list --all                           # ...also showing repos with no extra w
 cop list --verbose                       # ...with a column for each worktree's on-disk path
 cop list --no-size                       # skip the (directory-walking) size column, for a faster listing
 cop list --json                          # same data, as JSON
-cop remove add-customer-id-column        # remove a worktree by branch name (branch itself kept unless merged/-D)
+cop remove add-customer-id-column        # remove a worktree by branch name (branch kept unless merged/-D; parked worktrees are refused: cop unpark first)
 cop remove a b --repo dbt-models --yes
 cop remove                               # ...or omit the branch for an fzf multi-select picker
 cop clean --dry-run                      # preview worktrees (not branches) older than 14 days, size + merge status
-cop clean --yes                          # remove them (skips dirty worktrees and ones with an open PR)
+cop clean --yes                          # remove them (skips dirty, parked, and open-PR worktrees)
 cop clean --merged                       # sweep every worktree on a merged branch instead, regardless of age
 cop clean --parked                       # sweep worktrees parked 7+ days ago (same dirty/open-PR safety rails)
 cop clean 3 --parked --dry-run           # preview worktrees parked 3+ days ago

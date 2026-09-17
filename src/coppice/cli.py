@@ -1224,6 +1224,17 @@ def _picker_note(w: dict[str, Any]) -> str:
     return f"{_age_label(w)}{', dirty' if _is_dirty(w) else ''}"
 
 
+def _remove_picker_note(w: dict[str, Any]) -> str:
+    """`_picker_note` for `remove`, with the parked state appended: parked
+    worktrees stay listed (hiding them would contradict `cop list`), but
+    picking one fails with the unpark-first error. Markup-free, fzf renders
+    it as literal text."""
+    note = _picker_note(w)
+    if _effectively_parked(w):
+        note += f", parked {_parked_age_label(w)} (unpark to remove)"
+    return note
+
+
 def _pick_branches_interactively(
     scope: list[Path],
     candidates_by_repo: dict[Path, list[dict[str, Any]]],
@@ -1306,6 +1317,11 @@ def cmd_remove(
     a bare positional would be ambiguous with the BRANCH list. Omit BRANCH
     entirely for an fzf multi-select picker scoped the same way.
 
+    Parked worktrees (`cop park`) are refused, branch by branch: a parked
+    worktree is kept for follow-up, so removing one needs a `cop unpark`
+    first. A parked worktree whose branch head moved since the mark
+    (follow-up arrived) counts as active again and removes normally.
+
     Asks for confirmation before removing anything, unless --yes/-y is
     passed. This prompt is coppice's own, not `wt remove`'s: `wt` is always
     invoked with `-y`, so it never asks anything itself, and confirmation
@@ -1339,9 +1355,13 @@ def cmd_remove(
         ]
         for repo_root in scope
     }
+    # Parked marks decide which entries are refused below: a parked
+    # worktree is kept for follow-up, so destroying one needs an explicit
+    # `cop unpark` first.
+    _enrich_parked(removable, park_mod.parked_at_many(scope))
 
     if not branches:
-        branches = _pick_branches_interactively(scope, removable)
+        branches = _pick_branches_interactively(scope, removable, note=_remove_picker_note)
         if not branches:
             raise typer.Exit(1)
 
@@ -1357,6 +1377,15 @@ def cmd_remove(
             err.print(f"[red]Error:[/] branch '{branch_name}' exists in multiple repos, disambiguate with --repo:")
             for m in matches:
                 err.print(f"  {_short_path(m)}")
+            failures.append(branch_name)
+            continue
+
+        entry = next(w for w in removable[matches[0]] if w["branch"] == branch_name)
+        if _effectively_parked(entry):
+            err.print(
+                f"[red]Error:[/] '{branch_name}' @ {matches[0].name} is parked "
+                f"(parked {_parked_age_label(entry)} ago). Unpark it first: cop unpark {branch_name}"
+            )
             failures.append(branch_name)
             continue
 
@@ -1634,8 +1663,9 @@ def cmd_park(
     The mark is a `branch.<branch>.parked-at` timestamp in the repo's git
     config: it dies with the branch (so `remove` cleans it up for free) and
     never dirties the worktree. Parked worktrees render dimmed in `list`,
-    are skipped by `sync`, and `clean --parked` sweeps the ones parked a
-    week or more ago. If the branch head moves after the mark, the worktree
+    are skipped by `sync`, and are refused by `remove` and `clean` (unpark
+    first); `clean --parked` sweeps the ones parked a week or more ago. If
+    the branch head moves after the mark, the worktree
     reads as active again (a 'follow-up' note in `list`), the mark simply
     means 'nothing new since I marked it'.
 
@@ -1746,12 +1776,14 @@ def cmd_clean(
     repos"), same as 'coppice list'/'coppice remove' default, or restrict to
     one repo's worktrees with --repo/-C PATH ("all worktrees" in that repo).
 
-    Skips: the main worktree, the current worktree, dirty worktrees, and
-    branches with an open GitHub PR (via 'gh', when installed). A parked
-    worktree whose branch head moved since the mark (follow-up arrived)
-    counts as active again and is not swept. Reports an on-disk size
-    estimate per candidate, a total reclaimable size, and a final
-    removed/failed summary.
+    Skips: the main worktree, the current worktree, dirty worktrees,
+    branches with an open GitHub PR (via 'gh', when installed), and
+    (outside --parked) parked worktrees: a parked worktree is kept for
+    follow-up, so removing one needs a 'cop unpark' first, and --parked is
+    the sweep mode for them. A parked worktree whose branch head moved
+    since the mark (follow-up arrived) counts as active again and is not
+    swept. Reports an on-disk size estimate per candidate, a total
+    reclaimable size, and a final removed/failed summary.
     """
     if merged and parked:
         raise _fail("--merged and --parked are mutually exclusive.")
@@ -1789,13 +1821,15 @@ def cmd_clean(
     # reference is pruned by path with git instead.
     candidates: list[tuple[Path, str, int, str | None]] = []
     n_worktrees = n_young = n_dirty = n_pr = n_stale = n_unmerged = 0
-    n_unparked = n_followup = 0
+    n_unparked = n_followup = n_parked = 0
 
     # Fetch every repo's worktrees concurrently (one `wt` subprocess per
     # repo, overlapped rather than run one after another).
     worktrees_by_repo = wt.list_worktrees_many(scope)
-    if parked:
-        _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
+    # Every mode reads the parked marks: --parked sweeps by them, the other
+    # modes skip parked worktrees outright (unpark first, or sweep them
+    # with --parked).
+    _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
 
     # Pass 1, per repo, local only (no subprocess): stale, too-young/
     # unmerged, dirty. Whatever's left after those needs an open-PR check
@@ -1858,6 +1892,18 @@ def cmd_clean(
 
             seconds = _age_seconds(w)
             age_label = _humanize_age(seconds) if seconds is not None else "?"
+
+            if not parked and _effectively_parked(w):
+                # Parked worktrees are kept for follow-up: no age or
+                # mergedness makes one removable in this mode, removing one
+                # needs a 'cop unpark' first. --parked is the sweep mode
+                # and handles them itself, below.
+                n_parked += 1
+                lines.append(
+                    f"  [yellow]skip[/]  {age_label:>5}  {branch_name}  "
+                    f"[dim](parked {_parked_age_label(w)} ago; 'cop unpark {branch_name}' to clean)[/]"
+                )
+                continue
 
             if merged:
                 # Removable = the merged bucket only. Widening it past
@@ -1992,11 +2038,12 @@ def cmd_clean(
 
     console.print()
     stale_note = f", {n_stale} stale (dangling) reference(s)" if n_stale else ""
+    parked_note = f", {n_parked} parked (unpark to clean)" if n_parked else ""
     if merged:
         unmerged_note = f", {n_unmerged} not merged" if n_unmerged else ""
         console.print(
             f"Scanned {_plural(len(scope), 'repo')}, {_plural(n_worktrees, 'worktree')}: {len(candidates)} removable, "
-            f"{n_dirty} dirty, {n_pr} with an open PR{unmerged_note}{stale_note}."
+            f"{n_dirty} dirty, {n_pr} with an open PR{unmerged_note}{parked_note}{stale_note}."
         )
     elif parked:
         unparked_note = f", {n_unparked} not parked" if n_unparked else ""
@@ -2009,7 +2056,7 @@ def cmd_clean(
     else:
         console.print(
             f"Scanned {_plural(len(scope), 'repo')}, {_plural(n_worktrees, 'worktree')}: {len(candidates)} removable, "
-            f"{n_dirty} dirty, {n_pr} with an open PR, {n_young} under {days}d old{stale_note}."
+            f"{n_dirty} dirty, {n_pr} with an open PR{parked_note}, {n_young} under {days}d old{stale_note}."
         )
 
     if open_windows:

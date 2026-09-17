@@ -1879,10 +1879,12 @@ def test_clean_merged_and_parked_are_mutually_exclusive():
 def test_remove_drops_the_parked_mark_when_the_branch_went_with_it(tmp_path, monkeypatch):
     """`wt remove` deletes the ref directly (update-ref -d), which, unlike
     `git branch -D`, leaves the branch's config section behind, so coppice
-    drops the parked mark itself when the branch went with the worktree."""
+    drops the parked mark itself when the branch went with the worktree.
+    The worktree here has follow-up since the mark (its head is newer), so
+    it reads as active again and `remove` proceeds without an unpark."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
-    entries = [_entry("feat", tmp_path / "feat")]
+    entries = [_entry("feat", tmp_path / "feat", commit_ts=1_700_000_001.0)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: False)
@@ -1896,10 +1898,11 @@ def test_remove_drops_the_parked_mark_when_the_branch_went_with_it(tmp_path, mon
 
 def test_remove_keeps_the_parked_mark_when_the_branch_survives(tmp_path, monkeypatch):
     """A kept branch keeps its mark: recreating its worktree later revives
-    the parked state, which is exactly what the mark means."""
+    the parked state, which is exactly what the mark means. Follow-up since
+    the mark (a newer head) is what lets `remove` proceed here."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
-    entries = [_entry("feat", tmp_path / "feat")]
+    entries = [_entry("feat", tmp_path / "feat", commit_ts=1_700_000_001.0)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
@@ -1909,6 +1912,75 @@ def test_remove_keeps_the_parked_mark_when_the_branch_survives(tmp_path, monkeyp
 
     assert result.exit_code == 0, result.output
     assert park.parked_at(repo_dir) == {"feat": 1_700_000_000.0}
+
+
+def test_remove_refuses_a_parked_worktree(tmp_path, monkeypatch):
+    """A parked worktree is kept for follow-up: `remove` refuses it and
+    says to unpark first, instead of destroying it."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("feat", tmp_path / "feat", commit_ts=1_700_000_000.0)]
+    removed: list[str] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
+    park.park(repo_dir, "feat", at=1_700_000_000.0)
+
+    result = runner.invoke(app, ["remove", "feat", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 1
+    assert "'feat' @ repo is parked" in result.output
+    assert "Unpark it first: cop unpark feat" in result.output
+    assert removed == []
+    assert park.parked_at(repo_dir) == {"feat": 1_700_000_000.0}
+
+
+def test_remove_mixed_batch_removes_unparked_and_fails_parked(tmp_path, monkeypatch):
+    """A batch with both kinds removes the active worktree and fails the
+    parked one (exit 1), naming it in the closing failure list."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("active", tmp_path / "active", commit_ts=1_700_000_000.0),
+        _entry("parked-wt", tmp_path / "parked-wt", commit_ts=1_700_000_000.0),
+    ]
+    removed: list[str] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    park.park(repo_dir, "parked-wt", at=1_700_000_000.0)
+
+    result = runner.invoke(
+        app, ["remove", "active", "parked-wt", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"}
+    )
+
+    assert result.exit_code == 1
+    assert removed == ["active"]
+    assert "'parked-wt' @ repo is parked" in result.output
+    assert "Removed 1 worktree, 1 failed:" in result.output
+    assert park.parked_at(repo_dir) == {"parked-wt": 1_700_000_000.0}
+
+
+def test_remove_picker_marks_parked_candidates(tmp_path, monkeypatch):
+    """Bare `remove` lists parked worktrees with an unpark-first note
+    rather than hiding them (hiding them would contradict `cop list`)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch, which={"fzf": None})
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("active-branch", tmp_path / "active"),
+        _entry("parked-branch", tmp_path / "parked"),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    park.park(repo_dir, "parked-branch", at=1_700_000_000.0)
+
+    result = runner.invoke(app, ["remove", "--repo", str(repo_dir)], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 1
+    assert "fzf isn't installed" in result.output
+    assert "active-branch" in result.output
+    assert "parked-branch" in result.output
+    assert "unpark to remove" in result.output
+    assert "Re-run: coppice remove BRANCH" in result.output
 
 
 def test_clean_drops_the_parked_mark_for_removed_branches(tmp_path, monkeypatch):
@@ -1928,6 +2000,90 @@ def test_clean_drops_the_parked_mark_for_removed_branches(tmp_path, monkeypatch)
     assert result.exit_code == 0, result.output
     assert "Removed 1 worktree." in result.output
     assert park.parked_at(repo_dir) == {}
+
+
+def test_clean_skips_parked_worktrees(tmp_path, monkeypatch):
+    """Default-mode clean protects parked worktrees: an old parked worktree
+    is a visible skip with the unpark hint, not a candidate, while an
+    equally old unparked one is removed."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [
+        _entry("old-active", tmp_path / "active", commit_ts=now - 30 * 86400),
+        _entry("old-parked", tmp_path / "parked", commit_ts=now - 30 * 86400),
+    ]
+    removed: list[str] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    park.park(repo_dir, "old-parked", at=now - 10 * 86400)
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    flat = result.output.replace("\n", " ")
+    assert "'cop unpark old-parked' to clean" in flat
+    assert "1 parked (unpark to clean)" in flat
+    assert removed == ["old-active"]
+    assert "Removed 1 worktree." in result.output
+    assert park.parked_at(repo_dir) == {"old-parked": now - 10 * 86400}
+
+
+def test_clean_merged_skips_parked_worktrees(tmp_path, monkeypatch):
+    """--merged protects a parked worktree even when it is fully merged:
+    parked dominates mergedness."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [
+        _entry("merged-active", tmp_path / "active", commit_ts=now - 30 * 86400, main_state="integrated"),
+        _entry("merged-parked", tmp_path / "parked", commit_ts=now - 30 * 86400, main_state="integrated"),
+    ]
+    removed: list[str] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    park.park(repo_dir, "merged-parked", at=now - 10 * 86400)
+
+    result = runner.invoke(app, ["clean", "--merged", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    flat = result.output.replace("\n", " ")
+    assert "'cop unpark merged-parked' to clean" in flat
+    assert "1 parked (unpark to clean)" in flat
+    assert removed == ["merged-active"]
+    assert park.parked_at(repo_dir) == {"merged-parked": now - 10 * 86400}
+
+
+def test_clean_default_treats_a_parked_worktree_with_follow_up_as_active(tmp_path, monkeypatch):
+    """A parked worktree whose head moved since the mark reads as active
+    again: default-mode clean ages it like any other worktree, no unpark
+    needed."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    # Marked 40d ago, head 30d old: the head is newer than the mark
+    # (follow-up arrived), and old enough for the 14d default threshold.
+    entries = [_entry("comeback", tmp_path / "comeback", commit_ts=now - 30 * 86400)]
+    removed: list[str] = []
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    park.park(repo_dir, "comeback", at=now - 40 * 86400)
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    assert removed == ["comeback"]
+    assert "unpark to clean" not in result.output
+    assert "Removed 1 worktree." in result.output
 
 
 def test_status_reports_wt_and_registry(tmp_path, monkeypatch):
