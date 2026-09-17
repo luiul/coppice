@@ -469,12 +469,13 @@ prompt behaves the same way: one keypress, no enter needed.
 - When a worktree about to be removed has a VS Code window open on it,
   `remove` and `clean` mark its line with `(VS Code window open)` and
   suggest closing it first: deleting the directory out from under the
-  window strands it. Detection reads the window registry
-  (`~/.local/state/vscode-windows/`, written by dashkit's
-  vscode-window-registry extension) and matches exact folder paths, so
-  same-named worktrees and phantom branches can't warn wrongly. An
-  unreadable registry (extension not installed) stays silent rather
-  than ever claiming "not open".
+  window strands it. Detection lists the window titles (one System
+  Events osascript call; the dotfiles `window.title` setting renders
+  each title as the opened folder's full path, branch never matched)
+  and matches exact folder paths, so same-named worktrees and phantom
+  branches can't warn wrongly. A failed listing, or an empty one while
+  Code runs (macOS culls the accessibility tree of a backgrounded
+  app), stays silent rather than ever claiming "not open".
 
 Same discipline as the canopy/understory dashboards (see dashkit's
 [CONVENTIONS.md](https://github.com/luiul/dashkit/blob/main/CONVENTIONS.md)),

@@ -1,70 +1,87 @@
 """VS Code window detection for the `remove`/`clean` confirmation warnings.
 
-The source is the window registry (~/.local/state/vscode-windows/,
-written by dashkit's vscode-window-registry extension), tested here
-against files in a tmp_path directory: no real Code instance on CI, and
-no title parsing anywhere (identity is a folder path).
+The source is the window titles (one System Events osascript call; the
+dotfiles window.title setting puts the opened folder's full path before
+the first " — ", branch never matched), tested here by stubbing the
+osascript run: no real Code instance on CI. The parse and match logic is
+the Python twin of dashkit's mycelium/vscode.go, kept in sync with it.
 """
 
-import os
-import time
 from pathlib import Path
 
 from coppice import vscode
 
 
-def _write_entry(directory: Path, name: str, content: str, stale: bool = False) -> None:
-    file = directory / name
-    file.write_text(content)
-    if stale:
-        old = time.time() - 60
-        os.utime(file, (old, old))
+def _listing(titles: list[str], running: bool = True) -> str:
+    """The wire format _LIST_SCRIPT produces: running flag, then titles
+    joined by ASCII 30, after the ASCII 31 separator."""
+    return ("1" if running else "0") + "\x1f" + "".join(t + "\x1e" for t in titles)
 
 
-def test_registry_window_folders_is_none_without_the_directory(monkeypatch, tmp_path):
-    # Extension not installed: callers treat None as "can't tell" and
-    # stay silent.
-    monkeypatch.setattr(vscode, "_REGISTRY_DIR", tmp_path / "does-not-exist")
-    assert vscode.registry_window_folders() is None
+def test_title_path_parses_path_and_expands_tilde():
+    home = str(Path.home())
+    assert vscode.title_path("~/dotfiles — main") == f"{home}/dotfiles"
+    assert vscode.title_path("~/projects/my repo — feat/x") == f"{home}/projects/my repo"
+    assert vscode.title_path("/opt/repo — main") == "/opt/repo"
+    # A branch component that never rendered: the path is still
+    # everything before the separator.
+    assert vscode.title_path("~/dotfiles — ") == f"{home}/dotfiles"
+    assert vscode.title_path("~/dotfiles") == f"{home}/dotfiles"
+    # Only the first separator splits: branch names carry dashes.
+    assert vscode.title_path("~/dotfiles — patch/ISA-1 — wip") == f"{home}/dotfiles"
 
 
-def test_registry_window_folders_parses_fresh_entries(monkeypatch, tmp_path):
-    monkeypatch.setattr(vscode, "_REGISTRY_DIR", tmp_path)
-    _write_entry(
-        tmp_path,
-        "a.json",
-        '{"sessionId": "a", "folders": ["/w/tardis-community", "/w/tardis-community/pkg"], '
-        '"workspaceFile": "/w/tc.code-workspace", "updatedAt": "x"}',
+def test_title_path_rejects_titles_without_a_path():
+    # No-folder windows and foreign title formats never match.
+    assert vscode.title_path("") is None
+    assert vscode.title_path("Welcome — Visual Studio Code") is None
+    assert vscode.title_path("~root/repo — main") is None  # ~user form not expanded
+
+
+def test_window_paths_is_none_when_the_listing_fails(monkeypatch):
+    # Automation permission not granted, most likely: callers treat None
+    # as "can't tell" and stay silent.
+    monkeypatch.setattr(vscode, "_run_osascript", lambda _script: None)
+    assert vscode.window_paths() is None
+
+
+def test_window_paths_is_none_for_an_empty_listing_while_running(monkeypatch):
+    # Zero windows listed while Code runs is the accessibility-cull
+    # signature (luiul/dashkit#9): "can't tell", not "nothing open".
+    monkeypatch.setattr(vscode, "_run_osascript", lambda _script: _listing([]))
+    assert vscode.window_paths() is None
+
+
+def test_window_paths_is_empty_when_code_is_not_running(monkeypatch):
+    # Code closed is a definitive nothing-open: a real empty answer.
+    monkeypatch.setattr(vscode, "_run_osascript", lambda _script: _listing([], running=False))
+    assert vscode.window_paths() == []
+
+
+def test_window_paths_parses_titles_and_drops_pathless_ones(monkeypatch):
+    home = str(Path.home())
+    monkeypatch.setattr(
+        vscode,
+        "_run_osascript",
+        lambda _script: _listing(["~/dotfiles — main", "", "Welcome — Visual Studio Code", "~/repo"]),
     )
-    _write_entry(tmp_path, "b.json", '{"sessionId": "b", "folders": [], "workspaceFile": null, "updatedAt": "x"}')
-    assert vscode.registry_window_folders() == [["/w/tardis-community", "/w/tardis-community/pkg"], []]
+    assert vscode.window_paths() == [f"{home}/dotfiles", f"{home}/repo"]
 
 
-def test_registry_window_folders_prunes_stale_entries(monkeypatch, tmp_path):
-    # A closed window can't be relied on to delete its entry; the mtime
-    # cutoff is the cleanup.
-    monkeypatch.setattr(vscode, "_REGISTRY_DIR", tmp_path)
-    _write_entry(tmp_path, "fresh.json", '{"sessionId": "f", "folders": ["/w/a"], "workspaceFile": null}')
-    _write_entry(tmp_path, "stale.json", '{"sessionId": "s", "folders": ["/w/b"], "workspaceFile": null}', stale=True)
-    assert vscode.registry_window_folders() == [["/w/a"]]
+def test_window_paths_is_none_for_garbage_output(monkeypatch):
+    # Output in a shape the script never produces: don't guess.
+    monkeypatch.setattr(vscode, "_run_osascript", lambda _script: "garbage")
+    assert vscode.window_paths() is None
 
 
-def test_registry_window_folders_skips_torn_and_foreign_files(monkeypatch, tmp_path):
-    monkeypatch.setattr(vscode, "_REGISTRY_DIR", tmp_path)
-    _write_entry(tmp_path, "good.json", '{"sessionId": "g", "folders": ["/w/a"], "workspaceFile": null}')
-    _write_entry(tmp_path, "torn.json", '{"sessionId": "to')
-    (tmp_path / "fallback.log").write_text("not json\n")
-    assert vscode.registry_window_folders() == [["/w/a"]]
-
-
-def test_registry_matches_worktree_exact_and_nested():
-    assert vscode.registry_matches_worktree(["/w/repo"], Path("/w/repo"))
+def test_matches_worktree_exact_and_nested():
+    assert vscode.matches_worktree(["/w/repo"], Path("/w/repo"))
     # A window scoped to a subpackage is stranded by the removal too.
-    assert vscode.registry_matches_worktree(["/w/repo/pkg"], Path("/w/repo"))
-    assert not vscode.registry_matches_worktree(["/w/other"], Path("/w/repo"))
+    assert vscode.matches_worktree(["/w/repo/pkg"], Path("/w/repo"))
+    assert not vscode.matches_worktree(["/w/other"], Path("/w/repo"))
 
 
-def test_registry_matches_worktree_respects_element_boundaries():
+def test_matches_worktree_respects_element_boundaries():
     # "/wt-a" must not match "/wt-a-b": a raw string prefix is not a path
     # containment check.
-    assert not vscode.registry_matches_worktree(["/w/wt-a-b"], Path("/w/wt-a"))
+    assert not vscode.matches_worktree(["/w/wt-a-b"], Path("/w/wt-a"))

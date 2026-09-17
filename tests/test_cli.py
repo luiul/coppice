@@ -959,7 +959,7 @@ def test_clean_marks_candidates_with_an_open_vscode_window(tmp_path, monkeypatch
         _entry("main", tmp_path / "repo", is_main=True),
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
-    monkeypatch.setattr(vscode, "registry_window_folders", lambda: [[str(tmp_path / "mergeable")]])
+    monkeypatch.setattr(vscode, "window_paths", lambda: [str(tmp_path / "mergeable")])
 
     result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--dry-run"])
 
@@ -1194,15 +1194,15 @@ def test_remove_without_yes_prompts_and_proceeds_on_yes(tmp_path, monkeypatch):
 def test_remove_marks_a_target_with_an_open_vscode_window(tmp_path, monkeypatch):
     """A worktree a VS Code window has open gets marked in remove's
     confirmation listing, with the close-it-first note: deleting the
-    directory out from under the window strands it. The window registry
-    is the source: a fresh entry whose folder is the worktree (or inside
-    it) marks the line."""
+    directory out from under the window strands it. The window titles
+    are the source: a title whose path is the worktree (or inside it)
+    marks the line."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
-    monkeypatch.setattr(vscode, "registry_window_folders", lambda: [[str(tmp_path / "good")]])
+    monkeypatch.setattr(vscode, "window_paths", lambda: [str(tmp_path / "good")])
 
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
 
@@ -1210,15 +1210,15 @@ def test_remove_marks_a_target_with_an_open_vscode_window(tmp_path, monkeypatch)
     assert "Close the marked windows first" in result.output
 
 
-def test_remove_registry_match_respects_path_element_boundaries(tmp_path, monkeypatch):
+def test_remove_title_match_respects_path_element_boundaries(tmp_path, monkeypatch):
     """A window open on /w/good-old is not a window on /w/good: the
-    registry match is path containment, not a string prefix."""
+    title match is path containment, not a string prefix."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
-    monkeypatch.setattr(vscode, "registry_window_folders", lambda: [[str(tmp_path / "good-old")]])
+    monkeypatch.setattr(vscode, "window_paths", lambda: [str(tmp_path / "good-old")])
 
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
 
@@ -1226,14 +1226,15 @@ def test_remove_registry_match_respects_path_element_boundaries(tmp_path, monkey
 
 
 def test_remove_stays_silent_when_windows_cannot_be_listed(tmp_path, monkeypatch):
-    """An unreadable registry (extension not installed) is 'can't tell':
-    no marker, no note, rather than a claim of 'not open'."""
+    """A failed window listing (Automation permission not granted) is
+    'can't tell': no marker, no note, rather than a claim of 'not
+    open'."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("good-branch", tmp_path / "good", commit_ts=0)]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda *a, **k: None)
-    monkeypatch.setattr(vscode, "registry_window_folders", lambda: None)
+    monkeypatch.setattr(vscode, "window_paths", lambda: None)
 
     result = runner.invoke(app, ["remove", "good-branch", "--repo", str(repo_dir)], input="n\n")
 
