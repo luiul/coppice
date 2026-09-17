@@ -20,6 +20,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -331,12 +332,21 @@ def _freshen_explicit_base(repo_root: Path, base: str) -> None:
             git.fetch_base(repo_root, branch, remote=remote)
 
 
+def _stdin_is_tty() -> bool:
+    """Whether stdin is a terminal: only a person at a keyboard may approve
+    a recovery that moves or creates a directory. Module-level so tests can
+    swap it (CliRunner drives prompts through a pipe, which must read as
+    non-interactive there).
+    """
+    return sys.stdin.isatty()
+
+
 def _switch_with_recovery(repo_root: Path, branch: str, *, create: bool, base: str | None) -> dict[str, Any]:
     """`wt.switch` plus one recovery: when the switch fails because BRANCH's
     worktree path is occupied by a worktree sitting on a different branch,
-    offer to switch that worktree onto BRANCH in place (`wt`'s own suggested
-    remedy), then retry the switch so the normal flow (hooks, registration,
-    success output) continues unchanged.
+    offer the occupied-path remedies (`_recover_occupied_path`), then retry
+    the switch so the normal flow (hooks, registration, success output)
+    continues unchanged.
     """
     try:
         return wt.switch(repo_root, branch, create=create, base=base)
@@ -360,15 +370,23 @@ def _recover_occupied_path(
     switch`ed away by hand, which `wt list` reports as a
     branch_worktree_mismatch and `wt switch` refuses to touch).
 
-    Two remedies, offered as one prompt each:
+    Never offers anything when stdin isn't a terminal: on a pipe, `confirm`
+    falls back to buffered reads where only EOF cancels, so a `printf 'y\\n'
+    | cop new ...` would silently approve a directory move or creation.
+    Declining every remedy there instead re-raises the original (streamed,
+    already on screen) `wt` error, whose own remedy line (`cd <path> &&
+    git switch <branch>`) is the manual route (coppice#27).
+
+    Remedies, when interactive:
 
     - When the occupier is itself at the wrong path (a
-      branch_worktree_mismatch), relocate it to its own expected path
-      (`wt step relocate`): both worktrees survive, and BRANCH's path is
-      freed for the retried switch to create fresh.
-    - When the occupier is at its rightful path, the two branches
-      genuinely share one templated path (a sanitize collision), so the
-      only way through is switching the directory onto BRANCH in place
+      branch_worktree_mismatch) and `wt` can move it, ONE prompt offers
+      both remedies: switch the directory onto BRANCH in place (the
+      default, `s`), or relocate the occupier to its own expected path
+      (only on an explicit `r`). See `_offer_mismatch_remedies`.
+    - Otherwise (the occupier sits at its rightful path, the two branches
+      genuinely sharing one templated path in a sanitize collision, or
+      `wt` can't relocate it) the only way through is the in-place switch
       (`git switch`, `wt`'s own suggested remedy), evicting the occupier.
 
     Returns True when the user accepted and the remedy succeeded, so the
@@ -387,6 +405,10 @@ def _recover_occupied_path(
     # <path> && git switch <branch>'); the first line's copy is ~-shortened.
     match = re.search(rf"run cd (.+?) && git switch {re.escape(branch)}(?:\s|$)", stderr, re.M)
     if match is None:
+        return False
+    # Non-interactive stdin never gets a say: a piped answer could approve
+    # a directory move or creation, so every remedy is declined up front.
+    if not _stdin_is_tty():
         return False
     path = Path(match.group(1))
     # Cross-check the message against `wt`'s structured listing rather than
@@ -408,7 +430,9 @@ def _recover_occupied_path(
     if _is_mismatch(occupying):
         targets = wt.relocate_preview(repo_root, current)
         if targets:
-            return _offer_relocate(repo_root, branch, current, targets)
+            return _offer_mismatch_remedies(
+                repo_root, branch, current, occupying, path, targets, create=create, base=base
+            )
         # `wt` can't relocate it (locked, detached, a blocked target):
         # fall through to the in-place switch offer.
     dirty_note = " Its working tree is dirty." if _is_dirty(occupying) else ""
@@ -418,30 +442,77 @@ def _recover_occupied_path(
         console.print("Cancelled.")
         console.print()
         raise typer.Exit(1)
+    _switch_in_place(path, branch, create=create, base=base)
+    return True
+
+
+def _offer_mismatch_remedies(
+    repo_root: Path,
+    branch: str,
+    current: str,
+    occupying: dict[str, Any],
+    path: Path,
+    targets: list[dict[str, str]],
+    *,
+    create: bool,
+    base: str | None,
+) -> bool:
+    """Both remedies for a mismatched occupier, offered as ONE prompt with
+    switch-in-place as the default remedy (`s`): the directory `wt` wants
+    for BRANCH stays put and switches onto BRANCH, CURRENT stops being
+    checked out there, and nothing on disk changes location. Relocate (`r`)
+    moves the occupier to its own expected path instead (the moves TARGETS,
+    a `wt.relocate_preview` result, describe), which frees BRANCH's path
+    for a fresh worktree but breaks every path-keyed attachment to the old
+    directory (pi sessions, editor windows, terminals), and the follow-up
+    create at the old path turns that break into a silent content swap
+    (coppice#27). Always True on success; any key that isn't `s` or `r`
+    cancels the whole command instead of returning.
+    """
+    at = _short_path(path)
+    to = _short_path(Path(targets[0]["to"]))
+    dirty_note = " Its working tree is dirty." if _is_dirty(occupying) else ""
+    console.print()
+    console.print(f"'{current}' is checked out at {at}, the path meant for '{branch}'.{dirty_note}")
+    console.print(
+        f"  [bold]s[/]  Switch {at} to '{branch}' in place: the directory stays put,"
+        f" '{current}' stops being checked out, and its commits stay on its branch."
+    )
+    console.print(
+        f"  [bold]r[/]  Relocate '{current}' from {at} to {to}: the directory moves,"
+        f" a fresh worktree for '{branch}' is then created at {at}, and tools attached"
+        f" to {at} (pi sessions, editors, terminals) keep pointing at it."
+    )
+    choice = confirm.choose("Switch in place, or relocate?", "sr")
+    if choice is None:
+        console.print()
+        console.print("Cancelled.")
+        console.print()
+        raise typer.Exit(1)
+    if choice == "s":
+        _switch_in_place(path, branch, create=create, base=base)
+    else:
+        _relocate_occupier(repo_root, current, targets)
+    return True
+
+
+def _switch_in_place(path: Path, branch: str, *, create: bool, base: str | None) -> None:
+    """Run the in-place switch remedy (`git switch` inside the occupied
+    directory, `wt`'s own suggested remedy) and echo git's one-line
+    report."""
     try:
         report = git.switch_in_place(path, branch, create=create, base=base)
     except git.GitError as git_exc:
         raise _fail(str(git_exc)) from git_exc
     if report:
         console.print(report)
-    return True
 
 
-def _offer_relocate(repo_root: Path, branch: str, current: str, targets: list[dict[str, str]]) -> bool:
-    """The relocate remedy for `new`'s occupied-path failure: move the
-    occupier (CURRENT) to its own expected path (the moves TARGETS, from
-    `wt.relocate_preview`, say it makes), freeing BRANCH's path for the
-    retried `wt switch`. Always True on success; a declined prompt cancels
-    the command instead of returning.
-    """
-    console.print()
-    if not confirm.ask(
-        f"Relocate '{current}' to {_short_path(Path(targets[0]['to']))}? That frees the path for '{branch}'."
-    ):
-        console.print()
-        console.print("Cancelled.")
-        console.print()
-        raise typer.Exit(1)
+def _relocate_occupier(repo_root: Path, current: str, targets: list[dict[str, str]]) -> None:
+    """Run the relocate remedy: move CURRENT's worktree to its own expected
+    path, performing the moves TARGETS (a `wt.relocate_preview` result)
+    listed. A streamed failure already put `wt`'s own message on screen, so
+    it exits quietly rather than piling the short form on top."""
     try:
         wt.relocate(repo_root, current, targets)
     except wt.WtCommandError as exc:
@@ -450,7 +521,6 @@ def _offer_relocate(repo_root: Path, branch: str, current: str, targets: list[di
         raise _fail(str(exc)) from exc
     except OSError as exc:
         raise _fail(str(exc)) from exc
-    return True
 
 
 def _creation_ts(path: Path) -> float | None:

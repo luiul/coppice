@@ -9,10 +9,12 @@ fake `wt.list_worktrees`/`gh.open_prs` results rather than a real `wt`/`gh`
 install, so these pass in CI the same as locally.
 """
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 from coppice import cli, gh, git, park, repo, vscode, wt
@@ -43,6 +45,14 @@ def _stub_wt(monkeypatch, *, which: dict[str, str | None] | None = None):
     """
     table = {"wt": "/usr/bin/wt", **(which or {})}
     monkeypatch.setattr(wt.shutil, "which", lambda name: table.get(name))
+
+
+def _interactive_stdin(monkeypatch):
+    """Make the recovery's TTY guard see a terminal. CliRunner feeds
+    answers through a pipe, which the guard (correctly) treats as
+    non-interactive, refusing to approve any directory move or creation,
+    so recovery tests opt into interactivity explicitly."""
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
 
 
 def _entry(
@@ -476,6 +486,7 @@ def test_new_recovers_an_occupied_worktree_path(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo", dirty=True)
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
@@ -499,6 +510,7 @@ def test_new_occupied_path_prompt_declined_cancels(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo")
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
@@ -522,6 +534,7 @@ def test_new_occupied_path_recovery_creates_the_branch_when_creating(tmp_path, m
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo")
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [occupier])
@@ -569,14 +582,17 @@ def _stub_relocate(monkeypatch, occupier: dict[str, Any], *, targets: list[dict[
 
 
 def test_new_relocates_a_mismatched_occupier(tmp_path, monkeypatch):
-    """When the occupier is itself at the wrong path (a
-    branch_worktree_mismatch), the remedy that keeps both worktrees is
-    relocating it to its own expected path, not evicting it: the occupier
-    keeps a worktree, and BRANCH's freed path gets a fresh one on the
-    retried switch."""
+    """Relocate stays available for a mismatched occupier, but only on an
+    explicit `r`: the occupier moves to its own expected path (both
+    worktrees survive), and BRANCH's freed path gets a fresh one on the
+    retried switch. The prompt must say the full end state up front: the
+    from/to paths, and that a fresh BRANCH worktree takes over the old
+    path while tools attached to it (pi sessions, editors, terminals) keep
+    pointing at it (coppice#27)."""
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo", mismatch=True)
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
@@ -586,11 +602,20 @@ def test_new_relocates_a_mismatched_occupier(tmp_path, monkeypatch):
     relocate_calls = _stub_relocate(monkeypatch, occupier)
 
     result = runner.invoke(
-        app, ["new", str(repo_dir), "--branch", "review-jamie", "--yes"], input="y", env={"COLUMNS": "160"}
+        app, ["new", str(repo_dir), "--branch", "review-jamie", "--yes"], input="r", env={"COLUMNS": "160"}
     )
 
     assert result.exit_code == 0, result.output
-    assert "Relocate 'feature/other'" in result.output
+    # join the wrapped, styled prompt lines before matching phrases
+    shown = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+    occupier_path = Path(occupier["path"])
+    assert (
+        f"Relocate 'feature/other' from {cli._short_path(occupier_path)}"
+        f" to {cli._short_path(_relocate_target(occupier_path))}"
+    ) in shown
+    assert "a fresh worktree for 'review-jamie' is then created at" in shown
+    assert "(pi sessions, editors, terminals) keep pointing at it" in shown
+    assert "Switch in place, or relocate? [s/r/N]" in shown
     assert len(relocate_calls) == 1
     assert relocate_calls[0]["branch"] == "feature/other"
     assert git_calls == []  # no in-place switch: the occupier moved away whole
@@ -603,6 +628,7 @@ def test_new_relocate_declined_cancels(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo", mismatch=True)
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
@@ -625,6 +651,7 @@ def test_new_relocate_retry_still_creates_a_brand_new_branch(tmp_path, monkeypat
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo", mismatch=True)
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: False)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
@@ -633,7 +660,7 @@ def test_new_relocate_retry_still_creates_a_brand_new_branch(tmp_path, monkeypat
     switch_calls = _stub_occupied_switch(monkeypatch, occupier)
     relocate_calls = _stub_relocate(monkeypatch, occupier)
 
-    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "review-jamie"], input="y")
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "review-jamie"], input="r")
 
     assert result.exit_code == 0, result.output
     assert len(relocate_calls) == 1
@@ -649,6 +676,7 @@ def test_new_falls_back_to_switch_in_place_when_relocate_cant_move_it(tmp_path, 
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo", mismatch=True)
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
@@ -666,6 +694,92 @@ def test_new_falls_back_to_switch_in_place_when_relocate_cant_move_it(tmp_path, 
     assert len(switch_calls) == 2
 
 
+def test_new_mismatch_offers_switch_in_place_as_the_default_remedy(tmp_path, monkeypatch):
+    """A mismatched occupier gets both remedies in ONE prompt, and the
+    default remedy is the in-place switch (`s`): the directory stays put,
+    the occupier's branch just stops being checked out there, and no tool
+    attached to the path (pi sessions, editors, terminals) loses its place
+    (coppice#27)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
+    occupier = _entry("feature/other", tmp_path / "occupied" / "repo", mismatch=True)
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [occupier])
+    switch_calls = _stub_occupied_switch(monkeypatch, occupier)
+    git_calls = _stub_git_switch(monkeypatch)
+    relocate_calls = _stub_relocate(monkeypatch, occupier)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "review-jamie", "--yes"], input="s")
+
+    assert result.exit_code == 0, result.output
+    assert "Switch in place, or relocate?" in result.output
+    assert git_calls == [{"path": Path(occupier["path"]), "branch": "review-jamie", "create": False, "base": None}]
+    assert relocate_calls == []
+    assert len(switch_calls) == 2
+    assert "Reused worktree" in result.output
+
+
+def test_new_mismatch_prompt_cancels_on_any_other_key(tmp_path, monkeypatch):
+    """`y` is not an answer in the combined remedy prompt: relocate in
+    particular must never fire without an explicit `r`, so every key that
+    isn't `s` or `r` cancels the whole command."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
+    occupier = _entry("feature/other", tmp_path / "occupied" / "repo", mismatch=True)
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [occupier])
+    switch_calls = _stub_occupied_switch(monkeypatch, occupier)
+    git_calls = _stub_git_switch(monkeypatch)
+    relocate_calls = _stub_relocate(monkeypatch, occupier)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "review-jamie", "--yes"], input="y")
+
+    assert result.exit_code != 0
+    assert "Cancelled" in result.output
+    assert git_calls == []
+    assert relocate_calls == []
+    assert len(switch_calls) == 1
+
+
+@pytest.mark.parametrize("mismatch", [False, True])
+def test_new_recovery_never_moves_or_creates_dirs_on_piped_stdin(tmp_path, monkeypatch, mismatch):
+    """Piped stdin (`printf 'y\\n' | cop new ...`) must never approve a
+    directory move or creation: on a pipe only EOF cancels a prompt, so the
+    recovery declines every remedy up front and the original streamed `wt`
+    error, with its own `cd <path> && git switch <branch>` remedy line,
+    stays the manual route (coppice#27)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    # No _interactive_stdin: CliRunner's stdin is a pipe, exactly like a
+    # real `| cop new` invocation.
+    occupier = _entry("feature/other", tmp_path / "occupied" / "repo", mismatch=mismatch)
+    monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
+    monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [occupier])
+    switch_calls = _stub_occupied_switch(monkeypatch, occupier)
+    git_calls = _stub_git_switch(monkeypatch)
+    relocate_calls = _stub_relocate(monkeypatch, occupier)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "review-jamie", "--yes"], input="y")
+
+    assert result.exit_code != 0
+    assert git_calls == []
+    assert relocate_calls == []
+    assert len(switch_calls) == 1  # no retry
+    # no recovery prompt ran, and nothing was "Cancelled": the streamed
+    # `wt` error simply propagated
+    assert "Switch the worktree at" not in result.output
+    assert "Switch in place, or relocate?" not in result.output
+    assert "Cancelled" not in result.output
+
+
 def test_new_occupied_path_without_a_matching_worktree_falls_back(tmp_path, monkeypatch):
     """The message parse is cross-checked against `wt list`'s structured
     data: if no registered worktree sits at the parsed path there is no
@@ -673,6 +787,7 @@ def test_new_occupied_path_without_a_matching_worktree_falls_back(tmp_path, monk
     repo_dir = _init_repo(tmp_path / "repo")
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
+    _interactive_stdin(monkeypatch)
     occupier = _entry("feature/other", tmp_path / "occupied" / "repo")
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     monkeypatch.setattr(wt, "remote_branch_exists", lambda _repo, _branch: False)
