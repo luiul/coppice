@@ -575,8 +575,8 @@ def _is_mismatch(entry: dict[str, Any]) -> bool:
     directory was created for a different branch and later `git switch`ed
     by hand, so listings key the row by its branch while its path names
     another, and `wt switch` to that other branch refuses the occupied
-    path. The remedy is `wt step relocate` (see `new`'s occupied-path
-    recovery).
+    path. The remedy is `cop relocate` (`wt step relocate` underneath;
+    see also `new`'s occupied-path recovery).
     """
     return entry.get("worktree", {}).get("state") == "branch_worktree_mismatch"
 
@@ -1158,7 +1158,7 @@ def cmd_list(
     # State rollup across every listed worktree, so the closing line reads
     # as an actionable summary ('3 merged' nudges towards 'cop clean
     # --merged') rather than just a count.
-    n_merged = n_dirty = n_conflict = 0
+    n_merged = n_dirty = n_conflict = n_mismatch = 0
     n_repos_with = 0
     for repo_root in repos:
         others = [w for w in worktrees_by_repo[repo_root] if not w.get("is_main")]
@@ -1167,6 +1167,7 @@ def cmd_list(
             if _is_stale(w):
                 continue
             n_dirty += 1 if _is_dirty(w) else 0
+            n_mismatch += 1 if _is_mismatch(w) else 0
             bucket = _classify_main_state(w)
             n_merged += 1 if bucket == "merged" else 0
             n_conflict += 1 if bucket == "conflict" else 0
@@ -1181,6 +1182,8 @@ def cmd_list(
         summary += f" \u00b7 [{_STYLE_DIRTY}]{n_dirty} dirty[/]"
     if n_conflict:
         summary += f" \u00b7 [{_STYLE_CONFLICT}]{_plural(n_conflict, 'conflict')}[/]"
+    if n_mismatch:
+        summary += f" \u00b7 [{_STYLE_MISMATCH}]{n_mismatch} mismatched[/] [dim](cop relocate)[/]"
     console.print(summary + ".")
     if total_stale:
         console.print(f"[red]{total_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove.")
@@ -2204,6 +2207,114 @@ def _render_sync_attention(sections: list[tuple[Path, str | None, list[_SyncRow]
             subject, result, detail = _sync_cells(row)
             table.add_row(f"  {subject}", result, detail)
     console.print(table)
+
+
+@app.command("relocate", rich_help_panel="Update")
+def cmd_relocate(
+    path: Annotated[
+        str | None,
+        typer.Argument(
+            help="Only relocate this repo's worktrees. Omit to check every known repo plus the one you're standing in."
+        ),
+    ] = None,
+    dry_run: Annotated[bool, typer.Option("--dry-run", "-n", help="Report the moves without performing them.")] = False,
+) -> None:
+    """Move mismatched worktrees back to the path the template assigns their branch.
+
+    A mismatch (`cop list` flags it as 'branch @ other-dir/') means the
+    directory was created for one branch and later `git switch`ed by hand:
+    the path names one branch, the checkout serves another, and `wt switch`
+    to the path's branch refuses the occupied directory. Every move is
+    computed by `wt step relocate` (`wt` owns the worktree-path template,
+    coppice never reimplements it), previewed here across the whole scope,
+    then performed on confirmation.
+    """
+    try:
+        repos = repo.scope_repos(path)
+    except repo.RepoResolutionError as exc:
+        raise _fail(str(exc)) from exc
+
+    if not repos:
+        raise _fail("no known repos. Run 'coppice new' at least once, or pass a PATH.")
+
+    try:
+        wt.require_wt()
+    except wt.WtNotFoundError as exc:
+        raise _fail(str(exc)) from exc
+
+    with console.status("[dim]Checking worktree paths…[/dim]"):
+        worktrees_by_repo = wt.list_worktrees_many(repos)
+
+    # The plan: (repo, branch, moves) per mismatched worktree `wt` can
+    # move. The moves come from `wt`'s own dry run, never from a local
+    # re-derivation of the template, so a template edit is picked up here
+    # for free.
+    plan: list[tuple[Path, str, list[dict[str, str]]]] = []
+    blocked: list[tuple[Path, str]] = []
+    for repo_root in repos:
+        for w in worktrees_by_repo[repo_root]:
+            if w.get("is_main") or not _is_mismatch(w):
+                continue
+            branch = w.get("branch")
+            if not branch:
+                continue
+            targets = wt.relocate_preview(repo_root, branch)
+            if targets:
+                plan.append((repo_root, branch, targets))
+            else:
+                blocked.append((repo_root, branch))
+
+    if not plan and not blocked:
+        console.print("Every worktree already sits at its expected path.")
+        console.print()
+        return
+
+    console.print()
+    for repo_root, branch, targets in plan:
+        for target in targets:
+            console.print(
+                f"  [{_STYLE_MISMATCH}]{branch}[/] [dim]@[/] {repo_root.name}: "
+                f"{_short_path(Path(target['from']).expanduser())} -> {_short_path(Path(target['to']).expanduser())}"
+            )
+    for repo_root, branch in blocked:
+        console.print(
+            f"  [dim]{branch} @ {repo_root.name}: can't be relocated"
+            " (locked, detached, or its expected path is blocked)[/]"
+        )
+    console.print()
+
+    if dry_run:
+        console.print(
+            f"[dim]Dry run, nothing moved. Re-run without --dry-run to relocate {_plural(len(plan), 'worktree')}.[/]"
+        )
+        console.print()
+        return
+    if not plan:
+        return
+
+    # Unlike `new`'s occupied-path remedy, no stdin-is-a-TTY guard here:
+    # the user invoked `relocate` explicitly, so the intent to move
+    # directories is already unambiguous; the prompt is only a review gate
+    # (degrading to a buffered read on a pipe, same as `remove`'s).
+    if not confirm.ask(
+        f"Relocate {_plural(len(plan), 'worktree')} as above? Tools attached to the current"
+        " directories (editor windows, terminals, agent sessions) keep pointing at the old paths.",
+        tier="destructive",
+    ):
+        console.print()
+        console.print("Cancelled.")
+        console.print()
+        raise typer.Exit(1)
+    console.print()
+    for repo_root, branch, targets in plan:
+        try:
+            wt.relocate(repo_root, branch, targets)
+        except wt.WtCommandError as exc:
+            if exc.streamed:
+                raise typer.Exit(1) from exc
+            raise _fail(str(exc)) from exc
+    console.print(f"Relocated {_plural(len(plan), 'worktree')}.")
+    console.print()
 
 
 @app.command("sync", rich_help_panel="Update")

@@ -891,6 +891,147 @@ def test_list_flags_branch_path_mismatch(tmp_path, monkeypatch):
     assert "@ plain/" not in flat
 
 
+def test_list_summary_nudges_mismatches_at_relocate(tmp_path, monkeypatch):
+    """A mismatch row's '@ dir/' flag says WHERE the worktree sits; the
+    closing summary must complete the thought with WHAT to run about it,
+    the same way the merged count nudges towards 'cop clean --merged'."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feature/other", tmp_path / "review-jamie" / "repo", mismatch=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "160"})
+
+    assert result.exit_code == 0, result.output
+    flat = result.output.replace("\n", "")
+    assert "1 mismatched" in flat
+    assert "cop relocate" in flat
+
+
+def _stub_relocate_scope(monkeypatch, repo_dir, entries, targets_by_branch):
+    """Shared stubs for the `relocate` command tests: one repo in scope
+    holding ENTRIES, with `wt`'s relocate dry-run answering from
+    TARGETS_BY_BRANCH and the executor replaced by a recording fake, so no
+    real `wt` install or directory move happens. Returns the list of
+    (repo, branch, targets) calls the fake recorded."""
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [repo_dir])
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(wt, "relocate_preview", lambda _repo, branch: targets_by_branch.get(branch, []))
+    moves: list[tuple[Path, str, list[dict[str, str]]]] = []
+    monkeypatch.setattr(wt, "relocate", lambda repo_root, branch, targets: moves.append((repo_root, branch, targets)))
+    return moves
+
+
+def test_relocate_moves_mismatched_worktrees(tmp_path, monkeypatch):
+    """`cop relocate` hands every mismatched worktree to `wt step
+    relocate`: the branch's directory moves to the path the template
+    assigns, and worktrees already at their rightful path are untouched."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feature/other", tmp_path / "review-jamie" / "repo", mismatch=True),
+        _entry("plain", tmp_path / "plain" / "repo"),
+    ]
+    targets = [
+        {
+            "from": str(tmp_path / "review-jamie" / "repo"),
+            "to": str(tmp_path / "feature-other" / "repo"),
+        }
+    ]
+    moves = _stub_relocate_scope(monkeypatch, repo_dir, entries, {"feature/other": targets})
+
+    result = runner.invoke(app, ["relocate"], input="y")
+
+    assert result.exit_code == 0, result.output
+    assert moves == [(repo_dir, "feature/other", targets)]
+    flat = result.output.replace("\n", "")
+    assert "review-jamie" in flat
+    assert "feature-other" in flat
+
+
+def test_relocate_dry_run_moves_nothing(tmp_path, monkeypatch):
+    """--dry-run previews the same moves (so the review gate shows real
+    data) but never calls the executor."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feature/other", tmp_path / "review-jamie" / "repo", mismatch=True),
+    ]
+    targets = [
+        {
+            "from": str(tmp_path / "review-jamie" / "repo"),
+            "to": str(tmp_path / "feature-other" / "repo"),
+        }
+    ]
+    moves = _stub_relocate_scope(monkeypatch, repo_dir, entries, {"feature/other": targets})
+
+    result = runner.invoke(app, ["relocate", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert moves == []
+    assert "Dry run" in result.output
+    assert "review-jamie" in result.output
+
+
+def test_relocate_declined_moves_nothing(tmp_path, monkeypatch):
+    """A declined prompt cancels the whole command, like `new`'s
+    existing-branch prompt does: nothing moves."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feature/other", tmp_path / "review-jamie" / "repo", mismatch=True),
+    ]
+    targets = [
+        {
+            "from": str(tmp_path / "review-jamie" / "repo"),
+            "to": str(tmp_path / "feature-other" / "repo"),
+        }
+    ]
+    moves = _stub_relocate_scope(monkeypatch, repo_dir, entries, {"feature/other": targets})
+
+    result = runner.invoke(app, ["relocate"], input="n")
+
+    assert result.exit_code == 1, result.output
+    assert "Cancelled." in result.output
+    assert moves == []
+
+
+def test_relocate_reports_when_every_path_matches(tmp_path, monkeypatch):
+    """No mismatches is a quiet all-clear, not an empty table and not a
+    prompt."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("plain", tmp_path / "plain" / "repo"),
+    ]
+    moves = _stub_relocate_scope(monkeypatch, repo_dir, entries, {})
+
+    result = runner.invoke(app, ["relocate"])
+
+    assert result.exit_code == 0, result.output
+    assert "already sits at its expected path" in result.output
+    assert moves == []
+
+
+def test_relocate_without_wt_fails_clearly(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _hide_wt(monkeypatch)
+
+    result = runner.invoke(app, ["relocate", str(repo_dir)])
+
+    assert result.exit_code != 0
+    assert "wt" in result.output
+    assert "worktrunk.dev" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_list_json_emits_valid_json(tmp_path, monkeypatch):
     """`list --json` pipes into jq & co., so stdout must be parseable JSON
     even when a field is longer than the console width: Rich soft-wraps at

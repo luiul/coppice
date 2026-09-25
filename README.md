@@ -340,12 +340,102 @@ that branch's **worktree**, not the branch itself:
 | `cop new PATH [--branch B] [--base REF]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache; an explicit `REF` is fetched from its remote first, best-effort, since `wt` forks from the remote-tracking ref as it stands locally), plus a worktree checked out onto it; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y`; if `B`'s worktree path is occupied by a worktree checked out on another branch (a directory created for `B` earlier, later `git switch`ed away by hand), offers a fix and retries: switch the occupier back to `B` in place (the default remedy, `s`: the directory stays put, the occupier's commits stay on its branch), or, when `wt` can move the occupier, relocate it to its own expected path (explicit `r` only: a fresh `B` worktree then takes over the old path, and tools attached to the old path, pi sessions, editors, terminals, keep pointing at it); never moves or creates directories when stdin isn't a terminal |
 | `cop list [PATH]` | nothing, or a repo path | lists worktrees, one per checked-out branch, **not** every branch in the repo, and **not** the main worktree (see [Concepts](#concepts)); a worktree sitting at another branch's path (see the `cop new` remedy) is flagged ` @ <that-branch>/` next to its checked-out branch |
 | `cop sync [BRANCH...]` | nothing, or branch **names** | merges the repo's base remote into each branch's worktree (all of them by default), keeping long-lived worktrees current |
+| `cop relocate [PATH]` | nothing, or a repo path | moves each mismatched worktree (a directory created for one branch, later `git switch`ed to another, so the path and the checkout disagree) back to the path the worktree-path template assigns its branch, after a preview and confirmation; every move is computed by `wt step relocate`, never by a local copy of the template |
 | `cop remove BRANCH...` | one or more branch **names** | deletes each branch's worktree directory; the branch itself survives unless it's merged or `-D`/`--force-delete` is passed |
 | `cop clean` | filters (age or `--merged`) | the bulk version of `remove`: same branch-vs-worktree distinction applies |
 
 A branch with no worktree still exists; `git log`/`git checkout` see it
 fine, it's just not checked out anywhere. It won't show up in `cop list`,
 and there's nothing for `cop remove`/`cop clean` to act on.
+
+### What `cop relocate` moves: the directory, never the branch
+
+`cop relocate` heals a mismatch by renaming the directory on disk. The
+branch is not touched: same name, same commits, still checked out when
+the move finishes. Say `cop new ~/dbt-models --branch fix-thing`
+created a worktree for the new branch `fix-thing`. With the template
+`~/worktrees/{{ owner }}/{{ branch }}/{{ repo }}` its directory is
+`~/worktrees/acme/fix-thing/dbt-models`: owner `acme`, the branch name
+`fix-thing` as the parent segment, and the worktree directory itself
+named after the repo, `dbt-models`. Someone later runs
+`git switch spike-other` inside it, works there for a while, then
+parks the task with `cop park` and moves on. The path's branch
+segment still says `fix-thing` while the checkout serves the branch
+`spike-other`,
+so `cop list` flags the row as `spike-other @ fix-thing/`: the row's
+branch is the checked-out one, and the `@ .../` part is the parent
+directory's name. The relocate moves the directory to
+`~/worktrees/acme/spike-other/dbt-models`, the path the worktree-path
+template assigns the branch actually checked out there, and updates
+git's worktree metadata to match. Branch segment and branch agree
+again; the directory name stays `dbt-models` throughout.
+
+![cop relocate moves the mismatching directory to the checked-out branch's template path; below, a file tree follows a parked task through the move: the shared venv follows untouched, pi sessions stay in the old bucket, project memory is unchanged](diagrams/cop-relocate-what-moves.drawio.svg)
+
+What else follows the move depends on how a tool keys its state:
+
+- **The shared `.venv`** follows by itself. There is one real venv
+  per repo, in the main checkout; every worktree gets a `.venv`
+  symlink to it at creation (a venv's absolute paths can't be copied,
+  only shared or rebuilt). The symlink rides along inside the moved
+  directory, and its target never moves, so the environment keeps
+  working with nothing to reinstall. Only a shell that already
+  activated it points at the old path: re-activate from the new one.
+- **Git** is not path-keyed at all: branches, refs, and the checkout
+  are unaffected, and so is the `cop park` mark (a git config value
+  keyed by repo and branch).
+- **pi's project memory and skills** key on `basename(cwd)`. That is
+  why the example template ends in the repo name: every worktree of a
+  repo lands in the same bucket as the main checkout, and a relocate
+  only changes the branch segment in the middle, so the bucket name
+  survives unchanged. A template ending in the branch segment would
+  orphan the bucket on every relocate.
+- **pi's sessions** key on the full directory path. They stay behind
+  under the old path, still listed in the picker's global view. The
+  mechanics and the remedy are below.
+- **Editors and terminals** key on the path too: reopen them at the
+  new location.
+
+The goal for a parked task: weeks later you come back and keep
+working, and the piece that matters most is the environment, since a
+rebuilt venv is the expensive part. It survives the move on its own,
+as shown above. pi sessions are the one thing left behind. Each
+session is one file, `<timestamp>_<id>.jsonl`, in a bucket directory
+under `~/.pi/agent/sessions/`. The bucket name is the working
+directory, encoded: drop the leading slash, turn the remaining
+slashes into dashes, and wrap the result in `--`. Project memory uses
+a second, coarser key: `basename(cwd)`, so its bucket is just the
+repo name. On disk, before and after the move:
+
+```text
+~/
+├── dbt-models/  main checkout
+│   └── .venv/   the one real venv, shared by every worktree
+├── worktrees/acme/
+│   ├── fix-thing/
+│   │   └── dbt-models/  checked out: spike-other (mismatch), task parked
+│   │       └── .venv -> ~/dbt-models/.venv  symlink, rides along
+│   └── spike-other/
+│       └── dbt-models/  cop relocate moved it here; you return to the parked task
+│           └── .venv -> ~/dbt-models/.venv  same symlink, still resolves
+└── .pi/agent/
+    ├── sessions/  one bucket per full path
+    │   ├── --Users-you-worktrees-acme-fix-thing-dbt-models--/    old bucket: sessions stay here
+    │   │   ├── 2026-08-04T17-42-29-087Z_019fcdde-….jsonl
+    │   │   └── 2026-08-05T09-12-32-318Z_019fd132-….jsonl
+    │   └── --Users-you-worktrees-acme-spike-other-dbt-models--/  new bucket: next pi run starts here
+    └── projects-memory/  one bucket per repo (basename)
+        └── dbt-models/   unchanged by the move
+```
+
+`pi --continue` opens the most recent file in the current directory's
+bucket, and the `--resume` picker lists that bucket (it can also show
+every bucket). The relocate changed the working directory, so your
+next `pi` run computes a fresh bucket and the parked sessions no
+longer show up locally. They remain visible in the picker's global
+view; rename the old bucket to the new encoded path and `--continue`
+picks them up again. With a custom `sessionDir` pi also checks the
+recorded cwd, so update each moved file's first line too.
 
 ## What it looks like
 
@@ -436,6 +526,9 @@ cop sync --no-main                       # leave the main worktree's own checkou
 cop park                                 # mark the current worktree's branch parked (task complete, kept for follow-up)
 cop park feat-a feat-b                   # ...or park by branch name (a worktree's directory name works too)
 cop unpark feat-a                         # follow-up arrived: back to active (sync merges into it again)
+cop relocate                             # move mismatched worktrees (flagged '@ other-dir/' in cop list) back to their template paths
+cop relocate --dry-run                   # ...preview the moves, changing nothing
+cop relocate ~/dbt-models                # ...scoped to one repo
 cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
 cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)
