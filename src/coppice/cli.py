@@ -384,7 +384,7 @@ def _recover_occupied_path(
       both remedies: switch the directory onto BRANCH in place (the
       default, `s`), or relocate the occupier to its own expected path
       (only on an explicit `r`). See `_offer_mismatch_remedies`.
-    - Otherwise (the occupier sits at its rightful path, the two branches
+    - Otherwise (the occupier sits at its expected path, the two branches
       genuinely sharing one templated path in a sanitize collision, or
       `wt` can't relocate it) the only way through is the in-place switch
       (`git switch`, `wt`'s own suggested remedy), evicting the occupier.

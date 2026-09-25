@@ -887,7 +887,7 @@ def test_list_flags_branch_path_mismatch(tmp_path, monkeypatch):
     flat = result.output.replace("\n", "")
     assert "feature/other" in flat
     assert "@ review-jamie/" in flat
-    # a worktree at its rightful path gets no such flag
+    # a worktree at its expected path gets no such flag
     assert "@ plain/" not in flat
 
 
@@ -928,7 +928,7 @@ def _stub_relocate_scope(monkeypatch, repo_dir, entries, targets_by_branch):
 def test_relocate_moves_mismatched_worktrees(tmp_path, monkeypatch):
     """`cop relocate` hands every mismatched worktree to `wt step
     relocate`: the branch's directory moves to the path the template
-    assigns, and worktrees already at their rightful path are untouched."""
+    assigns, and worktrees already at their expected path are untouched."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [
