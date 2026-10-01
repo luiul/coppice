@@ -1590,24 +1590,39 @@ def test_remove_no_branch_falls_back_without_fzf(tmp_path, monkeypatch):
 # --- park/unpark ------------------------------------------------------------
 #
 # The parked mark itself is real (git config in the tmp repo, see
-# tests/test_park.py for its own contracts); only `wt list` is stubbed, via
-# the usual `wt.list_worktrees` monkeypatch.
+# tests/test_park.py for its own contracts). So is the resolution wherever
+# a test stands in a real worktree (the local fast path); only the
+# scan-path tests stub the per-repo listing, via a `git.worktree_entries`
+# monkeypatch (the one seam feeds both the local and the registry-wide
+# call).
+
+
+def _forbid_scan(monkeypatch):
+    """Fail the test if park's resolution leaves the local repo: the fast
+    paths must not read the registry, list other repos, or touch `wt`
+    (the parked mark is one git config key)."""
+
+    def _boom(what):
+        def _raise(*_args, **_kwargs):
+            raise AssertionError(f"unexpected scan: {what}")
+
+        return _raise
+
+    monkeypatch.setattr(repo, "known_repos", _boom("registry read"))
+    monkeypatch.setattr(repo, "prune_missing_repos", _boom("registry prune"))
+    monkeypatch.setattr(git, "worktree_entries_many", _boom("registry-wide listing"))
+    monkeypatch.setattr(wt, "list_worktrees_many", _boom("wt registry-wide listing"))
+    monkeypatch.setattr(wt, "require_wt", _boom("wt required"))
 
 
 def test_park_bare_inside_a_worktree_parks_its_branch(tmp_path, monkeypatch):
     """The common case: the task just finished and you're standing in the
     worktree, so bare `park` marks its branch with no arguments. The current
-    worktree is detected by path (`git rev-parse --show-toplevel`), not `wt
-    list`'s `is_current`: `wt` always runs with `-C repo_root`, so from its
-    cwd the main worktree is the current one."""
+    worktree is detected by path (`git rev-parse --show-toplevel` from the
+    real worktree), and `--repo` pointing at that same repo keeps the
+    resolution local."""
     repo_dir = _init_repo(tmp_path / "repo")
-    _stub_wt(monkeypatch)
     feat = _add_worktree(repo_dir, tmp_path / "feat", "feat")
-    entries = [
-        _entry("main", repo_dir, is_main=True),
-        _entry("feat", feat),
-    ]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.chdir(feat)
 
     result = runner.invoke(app, ["park", "--repo", str(repo_dir)])
@@ -1615,6 +1630,95 @@ def test_park_bare_inside_a_worktree_parks_its_branch(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "Parked 'feat' @ repo." in result.output
     assert set(park.parked_at(repo_dir)) == {"feat"}
+
+
+def test_park_bare_inside_a_worktree_never_scans_beyond_the_local_repo(tmp_path, monkeypatch):
+    """The fast path's actual point: bare `park` in a worktree resolves it
+    with local git calls only, no registry read, no other-repo listing, no
+    `wt` at all (the mark is one git config key)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    feat = _add_worktree(repo_dir, tmp_path / "feat", "feat")
+    _forbid_scan(monkeypatch)
+    monkeypatch.chdir(feat)
+
+    result = runner.invoke(app, ["park"])
+
+    assert result.exit_code == 0, result.output
+    assert "Parked 'feat' @ repo." in result.output
+    assert set(park.parked_at(repo_dir)) == {"feat"}
+
+
+def test_park_explicit_branch_from_the_main_checkout_stays_local(tmp_path, monkeypatch):
+    """Explicit BRANCH args resolve from the repo you stand in (here its
+    main checkout) without scanning the registry: standing in a repo
+    disambiguates by presence, the same reading `--repo .` would give."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _add_worktree(repo_dir, tmp_path / "feat", "feat")
+    _forbid_scan(monkeypatch)
+    monkeypatch.chdir(repo_dir)
+
+    result = runner.invoke(app, ["park", "feat"])
+
+    assert result.exit_code == 0, result.output
+    assert "Parked 'feat' @ repo." in result.output
+    assert set(park.parked_at(repo_dir)) == {"feat"}
+
+
+def test_park_explicit_branch_misses_locally_and_scans_the_registry(tmp_path, monkeypatch):
+    """A branch that isn't in the repo you stand in falls back to the
+    registry-wide scan (porcelain, not `wt`) and parks where it's found."""
+    repo_a = _init_repo(tmp_path / "repo-a")
+    repo_b = _init_repo(tmp_path / "repo-b")
+    _add_worktree(repo_b, tmp_path / "feat-b", "feat-b")
+    registry = tmp_path / "known-repos"
+    registry.write_text(f"{repo_a}\n{repo_b}\n")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", registry)
+    monkeypatch.chdir(repo_a)
+
+    result = runner.invoke(app, ["park", "feat-b"])
+
+    assert result.exit_code == 0, result.output
+    assert "Parked 'feat-b' @ repo-b." in result.output
+    assert set(park.parked_at(repo_b)) == {"feat-b"}
+    assert park.parked_at(repo_a) == {}
+
+
+def test_park_a_branch_existing_in_two_repos_errors_when_standing_outside(tmp_path, monkeypatch):
+    """Cross-repo ambiguity is still an error when nothing disambiguates:
+    the same branch in two repos, invoked from neither."""
+    repo_a = _init_repo(tmp_path / "repo-a")
+    repo_b = _init_repo(tmp_path / "repo-b")
+    _add_worktree(repo_a, tmp_path / "feat-a", "feat")
+    _add_worktree(repo_b, tmp_path / "feat-b", "feat")
+    registry = tmp_path / "known-repos"
+    registry.write_text(f"{repo_a}\n{repo_b}\n")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", registry)
+    monkeypatch.chdir(tmp_path)  # not a repo: no local resolution
+
+    result = runner.invoke(app, ["park", "feat"])
+
+    assert result.exit_code != 0
+    assert "branch 'feat' exists in multiple repos" in result.output
+    assert park.parked_at(repo_a) == {}
+    assert park.parked_at(repo_b) == {}
+
+
+def test_park_a_branch_existing_in_two_repos_resolves_to_where_you_stand(tmp_path, monkeypatch):
+    """Standing in one of the repos disambiguates by presence: your repo's
+    worktree is the target, no error, and no scan needed."""
+    repo_a = _init_repo(tmp_path / "repo-a")
+    repo_b = _init_repo(tmp_path / "repo-b")
+    _add_worktree(repo_a, tmp_path / "feat-a", "feat")
+    _add_worktree(repo_b, tmp_path / "feat-b", "feat")
+    _forbid_scan(monkeypatch)
+    monkeypatch.chdir(repo_a)
+
+    result = runner.invoke(app, ["park", "feat"])
+
+    assert result.exit_code == 0, result.output
+    assert "Parked 'feat' @ repo-a." in result.output
+    assert set(park.parked_at(repo_a)) == {"feat"}
+    assert park.parked_at(repo_b) == {}
 
 
 def test_park_bare_outside_a_worktree_falls_back_without_fzf(tmp_path, monkeypatch):
@@ -1629,7 +1733,7 @@ def test_park_bare_outside_a_worktree_falls_back_without_fzf(tmp_path, monkeypat
         _entry("active-branch", tmp_path / "active"),
         _entry("parked-branch", tmp_path / "parked"),
     ]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
     monkeypatch.chdir(repo_dir)  # standing in the main checkout: no current managed worktree
     park.park(repo_dir, "parked-branch", at=1_700_000_000.0)
 
@@ -1645,7 +1749,7 @@ def test_park_bare_outside_a_worktree_falls_back_without_fzf(tmp_path, monkeypat
 def test_park_without_candidates_errors(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: [_entry("main", repo_dir, is_main=True)])
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: [_entry("main", repo_dir, is_main=True)])
 
     result = runner.invoke(app, ["park", "--repo", str(repo_dir)])
 
@@ -1657,10 +1761,8 @@ def test_parking_a_dirty_worktree_asks_first(tmp_path, monkeypatch):
     """Dirty and complete contradict each other, so parking a dirty
     worktree confirms first; declining parks nothing."""
     repo_dir = _init_repo(tmp_path / "repo")
-    _stub_wt(monkeypatch)
     feat = _add_worktree(repo_dir, tmp_path / "feat", "feat")
-    entries = [_entry("feat", feat, dirty=True)]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    (feat / "dirty.txt").write_text("not committed\n")
     monkeypatch.chdir(feat)
 
     result = runner.invoke(app, ["park", "--repo", str(repo_dir)], input="n\n")
@@ -1673,10 +1775,8 @@ def test_parking_a_dirty_worktree_asks_first(tmp_path, monkeypatch):
 
 def test_parking_a_dirty_worktree_proceeds_on_yes(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
-    _stub_wt(monkeypatch)
     feat = _add_worktree(repo_dir, tmp_path / "feat", "feat")
-    entries = [_entry("feat", feat, dirty=True)]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    (feat / "dirty.txt").write_text("not committed\n")
     monkeypatch.chdir(feat)
 
     result = runner.invoke(app, ["park", "--repo", str(repo_dir)], input="y\n")
@@ -1687,10 +1787,8 @@ def test_parking_a_dirty_worktree_proceeds_on_yes(tmp_path, monkeypatch):
 
 def test_park_yes_skips_the_dirty_prompt(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
-    _stub_wt(monkeypatch)
     feat = _add_worktree(repo_dir, tmp_path / "feat", "feat")
-    entries = [_entry("feat", feat, dirty=True)]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    (feat / "dirty.txt").write_text("not committed\n")
     monkeypatch.chdir(feat)
 
     result = runner.invoke(app, ["park", "--repo", str(repo_dir), "--yes"])
@@ -1704,7 +1802,7 @@ def test_park_explicit_branch_and_repark_refreshes(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("feat", tmp_path / "feat")]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
 
     first = runner.invoke(app, ["park", "feat", "--repo", str(repo_dir)])
     assert first.exit_code == 0, first.output
@@ -1721,7 +1819,7 @@ def test_park_unknown_branch_fails(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("feat", tmp_path / "feat")]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
 
     result = runner.invoke(app, ["park", "nope", "--repo", str(repo_dir)])
 
@@ -1735,7 +1833,7 @@ def test_park_stale_entry_is_not_parkable(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("gone", tmp_path / "gone", stale=True)]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
 
     result = runner.invoke(app, ["park", "gone", "--repo", str(repo_dir)])
 
@@ -1751,7 +1849,7 @@ def test_park_by_worktree_directory_name(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("feature/long-branch-name", tmp_path / "isa-orch")]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
 
     result = runner.invoke(app, ["park", "isa-orch", "--repo", str(repo_dir)])
 
@@ -1767,7 +1865,7 @@ def test_park_directory_fallback_still_skips_stale_entries(tmp_path, monkeypatch
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("gone", tmp_path / "gone-dir", stale=True)]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
 
     result = runner.invoke(app, ["park", "gone-dir", "--repo", str(repo_dir)])
 
@@ -1785,7 +1883,7 @@ def test_park_branch_match_wins_over_a_directory_name(tmp_path, monkeypatch):
         _entry("feat-a", tmp_path / "shared"),
         _entry("shared", tmp_path / "other"),
     ]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
 
     result = runner.invoke(app, ["park", "shared", "--repo", str(repo_dir)])
 
@@ -1798,7 +1896,7 @@ def test_unpark_by_worktree_directory_name(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("feature/long-branch-name", tmp_path / "isa-orch")]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
     park.park(repo_dir, "feature/long-branch-name", at=1_000_000_000.0)
 
     result = runner.invoke(app, ["unpark", "isa-orch", "--repo", str(repo_dir)])
@@ -1812,7 +1910,7 @@ def test_unpark_removes_the_mark(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("feat", tmp_path / "feat")]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
     park.park(repo_dir, "feat", at=1_000_000_000.0)
 
     result = runner.invoke(app, ["unpark", "feat", "--repo", str(repo_dir)])
@@ -1823,15 +1921,15 @@ def test_unpark_removes_the_mark(tmp_path, monkeypatch):
 
 
 def test_unpark_bare_inside_a_parked_worktree(tmp_path, monkeypatch):
+    """Bare `unpark` in a parked worktree removes its mark, resolved with
+    local git calls only (the same fast path as `park`)."""
     repo_dir = _init_repo(tmp_path / "repo")
-    _stub_wt(monkeypatch)
     feat = _add_worktree(repo_dir, tmp_path / "feat", "feat")
-    entries = [_entry("feat", feat)]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    _forbid_scan(monkeypatch)
     monkeypatch.chdir(feat)
     park.park(repo_dir, "feat", at=1_000_000_000.0)
 
-    result = runner.invoke(app, ["unpark", "--repo", str(repo_dir)])
+    result = runner.invoke(app, ["unpark"])
 
     assert result.exit_code == 0, result.output
     assert "Unparked 'feat' @ repo" in result.output
@@ -1848,7 +1946,7 @@ def test_unpark_bare_in_an_unparked_worktree_opens_the_picker(tmp_path, monkeypa
         _entry("feat", feat),
         _entry("other", tmp_path / "other"),
     ]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
     monkeypatch.chdir(feat)
     park.park(repo_dir, "other", at=1_700_000_000.0)
 
@@ -1865,7 +1963,7 @@ def test_unpark_not_parked_is_a_note_not_an_error(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("feat", tmp_path / "feat")]
-    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    monkeypatch.setattr(git, "worktree_entries", lambda _repo: entries)
 
     result = runner.invoke(app, ["unpark", "feat", "--repo", str(repo_dir)])
 

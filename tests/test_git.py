@@ -5,6 +5,7 @@ network is involved. The helpers are exercised end-to-end through the
 contracts (exit-code mapping, ancestor direction, abort tolerance).
 """
 
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -172,3 +173,94 @@ def test_switch_in_place_raises_on_an_unknown_branch(tmp_path):
     repo_dir, _origin = _init_with_origin(tmp_path)
     with pytest.raises(git.GitError):
         git.switch_in_place(repo_dir, "does-not-exist")
+
+
+# --- worktree listing (porcelain) + dirtiness ------------------------------
+#
+# The cheap data source behind park/unpark's resolution: one
+# `git worktree list --porcelain` per repo instead of `wt list`'s ~10
+# subprocesses, parsed into the wt-shaped entry fields park reads.
+
+
+def _init_repo(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "--allow-empty", "-q", "-m", "init"], check=True)
+    return path
+
+
+def test_worktree_entries_reports_main_and_linked(tmp_path):
+    repo_dir = _init_repo(tmp_path / "repo")
+    wt_dir = tmp_path / "feat"
+    _git(repo_dir, "worktree", "add", "-q", "-b", "feat", str(wt_dir))
+
+    entries = git.worktree_entries(repo_dir)
+
+    by_branch = {e["branch"]: e for e in entries}
+    assert set(by_branch) == {"main", "feat"}
+    main, feat = by_branch["main"], by_branch["feat"]
+    assert main["is_main"] is True
+    assert Path(main["path"]).resolve() == repo_dir.resolve()
+    assert feat["is_main"] is False
+    assert Path(feat["path"]).resolve() == wt_dir.resolve()
+    assert feat["worktree"]["state"] == "active"
+
+
+def test_worktree_entries_marks_a_missing_directory_prunable(tmp_path):
+    """A worktree whose directory was removed out of band reads as
+    'prunable', the same state wt's JSON reports for the dangling
+    registration (parkable excludes it: nothing left to keep)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    wt_dir = tmp_path / "gone"
+    _git(repo_dir, "worktree", "add", "-q", "-b", "feat", str(wt_dir))
+    shutil.rmtree(wt_dir)
+
+    entries = git.worktree_entries(repo_dir)
+
+    feat = next(e for e in entries if e["branch"] == "feat")
+    assert feat["worktree"]["state"] == "prunable"
+
+
+def test_worktree_entries_detached_has_no_branch(tmp_path):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _git(repo_dir, "worktree", "add", "-q", "--detach", str(tmp_path / "detached"))
+
+    entries = git.worktree_entries(repo_dir)
+
+    det = next(e for e in entries if e["path"].endswith("detached"))
+    assert det["branch"] is None
+    assert det["is_main"] is False
+
+
+def test_worktree_entries_a_non_repo_yields_nothing(tmp_path):
+    assert git.worktree_entries(tmp_path) == []
+
+
+def test_worktree_entries_many_covers_every_repo(tmp_path):
+    repo_a = _init_repo(tmp_path / "a")
+    repo_b = _init_repo(tmp_path / "b")
+
+    result = git.worktree_entries_many([repo_a, repo_b, repo_a])  # dupes collapse
+
+    assert set(result) == {repo_a, repo_b}
+    assert [e["branch"] for e in result[repo_a]] == ["main"]
+    assert [e["branch"] for e in result[repo_b]] == ["main"]
+
+
+def test_dirty_flags(tmp_path):
+    repo_dir = _init_repo(tmp_path / "repo")
+    assert not any(git.dirty_flags(repo_dir).values())
+
+    (repo_dir / "new.txt").write_text("x\n")
+    assert git.dirty_flags(repo_dir)["untracked"] is True
+
+    _git(repo_dir, "add", "new.txt")
+    assert git.dirty_flags(repo_dir)["staged"] is True
+
+
+def test_dirty_flags_reads_a_non_repo_as_clean(tmp_path):
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert not any(git.dirty_flags(plain).values())

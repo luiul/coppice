@@ -9,8 +9,12 @@ behind `new`'s occupied-path remedy.
 
 from __future__ import annotations
 
+import os
 import subprocess
+from collections.abc import Iterable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 
 class GitError(RuntimeError):
@@ -83,6 +87,99 @@ def merge_abort(wt_path: Path) -> None:
 def ff_only(wt_path: Path, ref: str) -> None:
     """Fast-forward the branch checked out at WT_PATH to REF."""
     _git(["merge", "--ff-only", ref], cwd=wt_path)
+
+
+def worktree_entries(repo_root: Path) -> list[dict[str, Any]]:
+    """Every worktree of REPO_ROOT as `git worktree list --porcelain`
+    reports it, parsed into the same entry shape `wt list --format json`
+    produces for the fields park/unpark read: `branch` (None when
+    detached), `path`, `is_main` (the entry whose path is the repo root),
+    and `worktree.state` ('prunable' when the directory is gone, else
+    'active').
+
+    One subprocess per repo where `wt list` spawns about ten: park's
+    resolution needs nothing more than this. Merge status, remote
+    divergence, and commit details are `list`/`remove` data, still fetched
+    via `wt.list_worktrees` there. `commit.timestamp` is unknown here, so
+    age labels on porcelain entries fall back to the filesystem birth time
+    (see `_age_seconds`). A repo that errors (missing dir, not a repo)
+    yields no entries, same as `wt.list_worktrees`."""
+    proc = _git(["worktree", "list", "--porcelain"], cwd=repo_root, check=False)
+    if proc.returncode != 0:
+        return []
+    main_real = os.path.realpath(repo_root)
+    entries: list[dict[str, Any]] = []
+    path: str | None = None
+    branch: str | None = None
+    prunable = False
+
+    def _flush() -> None:
+        nonlocal path, branch, prunable
+        if path is None:
+            return
+        entries.append(
+            {
+                "branch": branch,
+                "path": path,
+                "is_main": os.path.realpath(path) == main_real,
+                "worktree": {"state": "prunable" if prunable else "active"},
+            }
+        )
+        path, branch, prunable = None, None, False
+
+    for line in proc.stdout.splitlines():
+        if not line:
+            _flush()
+        elif line.startswith("worktree "):
+            path = line[len("worktree ") :]
+        elif line.startswith("branch "):
+            branch = line[len("branch ") :].removeprefix("refs/heads/")
+        elif line.startswith("prunable"):
+            prunable = True
+    _flush()
+    return entries
+
+
+def worktree_entries_many(repos: Iterable[Path]) -> dict[Path, list[dict[str, Any]]]:
+    """`worktree_entries` for every REPO in REPOS, run concurrently: same
+    all-subprocess-wait overlap reasoning as `wt.list_worktrees_many`,
+    including the 8-wide cap, the dedupe, and skipping the pool for 0 or 1
+    repos."""
+    unique = list(dict.fromkeys(repos))
+    if len(unique) <= 1:
+        return {r: worktree_entries(r) for r in unique}
+    with ThreadPoolExecutor(max_workers=min(len(unique), 8)) as pool:
+        futures = {r: pool.submit(worktree_entries, r) for r in unique}
+        return {r: f.result() for r, f in futures.items()}
+
+
+def dirty_flags(path: str | Path) -> dict[str, bool]:
+    """The worktree at PATH's dirtiness as the same flag dict `wt list`
+    reports under `working_tree` (any flag set == dirty), from one
+    `git status --porcelain` (default untracked mode, same as wt's
+    --untracked-files=normal). A path that isn't a worktree (anymore)
+    reads clean: there's nothing to lose in it either way."""
+    flags = {"staged": False, "modified": False, "untracked": False, "renamed": False, "deleted": False}
+    proc = _git(["status", "--porcelain"], cwd=Path(path), check=False)
+    if proc.returncode != 0:
+        return flags
+    for line in proc.stdout.splitlines():
+        if not line:
+            continue
+        x, y = line[0], line[1] if len(line) > 1 else " "
+        if x == "?" and y == "?":
+            flags["untracked"] = True
+        if x in "MADRC":
+            flags["staged"] = True
+        if y in "MD" or "U" in (x, y):
+            # Unmerged (conflict) states ('UU', 'AU', 'UD', ...) count as
+            # modified: there are uncommitted changes either way.
+            flags["modified"] = True
+        if "R" in (x, y):
+            flags["renamed"] = True
+        if "D" in (x, y):
+            flags["deleted"] = True
+    return flags
 
 
 def switch_in_place(wt_path: Path, branch: str, *, create: bool = False, base: str | None = None) -> str:

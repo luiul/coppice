@@ -1499,6 +1499,89 @@ def _standing_in(parkable: dict[Path, list[dict[str, Any]]]) -> tuple[Path, dict
     return None
 
 
+def _same_path(a: Path, b: Path) -> bool:
+    """Realpath equality: symlinked parents (/var vs /private/var on macOS)
+    must not defeat scope comparisons."""
+    return os.path.realpath(a) == os.path.realpath(b)
+
+
+def _match_branch_in_repo(parkable: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
+    """The one parkable entry NAME resolves to within a single repo: branch
+    name first, then the worktree's directory name (its path's basename,
+    what `ls` of the worktrees dir shows). Branch matches always win on a
+    collision (the mark is keyed by branch, so the branch reading is the
+    canonical one), and branch names are unique within a repo, so no
+    ambiguity is possible here. Cross-repo ambiguity is the global
+    resolver's job."""
+    for w in parkable:
+        if w["branch"] == name:
+            return w
+    for w in parkable:
+        if w.get("path") and Path(w["path"]).name == name:
+            return w
+    return None
+
+
+def _resolve_targets_globally(
+    scope: list[Path],
+    parkable: dict[Path, list[dict[str, Any]]],
+    names: list[str],
+    failures: list[str],
+) -> list[tuple[Path, dict[str, Any]]]:
+    """Match NAMES against every parkable worktree in SCOPE: branch name
+    first, directory-name fallback, and a multi-repo match is an error
+    telling the user to disambiguate with --repo. Unresolvable names
+    collect into FAILURES rather than aborting, so the rest still park."""
+    targets: list[tuple[Path, dict[str, Any]]] = []
+    for name in names:
+        matches = [(r, w) for r in scope for w in parkable[r] if w["branch"] == name]
+        if not matches:
+            matches = [(r, w) for r in scope for w in parkable[r] if w.get("path") and Path(w["path"]).name == name]
+        if not matches:
+            err.print(f"[red]Error:[/] no parkable worktree for branch or directory '{name}' found in scope.")
+            failures.append(name)
+            continue
+        if len(matches) > 1:
+            err.print(f"[red]Error:[/] branch '{name}' exists in multiple repos, disambiguate with --repo:")
+            for r, _ in matches:
+                err.print(f"  {_short_path(r)}")
+            failures.append(name)
+            continue
+        targets.append(matches[0])
+    return targets
+
+
+def _enrich_dirty(worktrees_by_repo: dict[Path, list[dict[str, Any]]]) -> None:
+    """Fill in the `working_tree` dirtiness flags of entries that lack them
+    (porcelain entries, unlike `wt list`'s), for the park picker's ',
+    dirty' note: one `git status` per real worktree, overlapped (same
+    all-wait reasoning as `wt.list_worktrees_many`). Entries that already
+    carry flags are left alone."""
+    pending = [
+        w
+        for worktrees in worktrees_by_repo.values()
+        for w in worktrees
+        if "working_tree" not in w and w.get("path") and not _is_stale(w)
+    ]
+    if not pending:
+        return
+    with ThreadPoolExecutor(max_workers=min(len(pending), 8)) as pool:
+        futures = [pool.submit(git.dirty_flags, w["path"]) for w in pending]
+        for w, future in zip(pending, futures, strict=True):
+            w["working_tree"] = future.result()
+
+
+def _target_dirty(entry: dict[str, Any]) -> bool:
+    """Dirtiness of a chosen park target: the entry's own `working_tree`
+    flags when it carries them (picker candidates), else a fresh
+    `git status` of its path (porcelain fast-path entries)."""
+    if "working_tree" in entry:
+        return _is_dirty(entry)
+    if not entry.get("path"):
+        return False
+    return any(git.dirty_flags(entry["path"]).values())
+
+
 def _park_unpark(
     branches: list[str] | None,
     repo_path: str | None,
@@ -1507,77 +1590,87 @@ def _park_unpark(
     unpark: bool,
 ) -> None:
     """Shared implementation of `park`/`unpark`: resolve the target
-    worktrees (the current one when bare inside a worktree, an fzf picker
-    when bare outside one, explicit BRANCHes otherwise), then set/delete
-    each branch's `parked-at` config key. Parking a dirty worktree asks
-    first (dirty and complete contradict each other) unless --yes."""
+    worktrees, then set/delete each branch's `parked-at` config key.
+    Parking a dirty worktree asks first (dirty and complete contradict
+    each other) unless --yes.
+
+    Resolution is local-first. The write is one git config key, so finding
+    the target must not pay for a registry-wide listing: when the repo you
+    stand in is in scope (always without --repo), a handful of local git
+    calls resolves the current worktree or explicit BRANCHes from `git
+    worktree list --porcelain` (one spawn, not `wt list`'s ~10). Only what
+    misses locally falls back to the full scope scan, itself
+    porcelain-based. Standing in a repo also disambiguates by presence: a
+    branch existing in several repos resolves to yours, the same reading
+    `--repo .` would give; the multi-repo error remains for targets that
+    aren't local."""
     verb = "Unpark" if unpark else "Park"
-    try:
-        scope = repo.scope_repos(repo_path)
-    except repo.RepoResolutionError as exc:
-        raise _fail(str(exc)) from exc
-
-    if not scope:
-        raise _fail("no known repos. Run 'coppice new' at least once, or pass --repo.")
 
     try:
-        wt.require_wt()
-    except wt.WtNotFoundError as exc:
-        raise _fail(str(exc)) from exc
+        cwd_repo = repo.resolve_repo_root(".")
+    except repo.RepoResolutionError:
+        cwd_repo = None
 
-    worktrees_by_repo = wt.list_worktrees_many(scope)
-    _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
-    parkable = _parkable(worktrees_by_repo)
+    scope: list[Path] | None = None
+    if repo_path is not None:
+        try:
+            scope = [repo.resolve_repo_root(repo_path)]
+        except repo.RepoResolutionError as exc:
+            raise _fail(str(exc)) from exc
+
+    # The repo you stand in only counts when it's in scope: always without
+    # --repo (scope includes it by definition); with --repo, only when it
+    # IS that repo.
+    local = cwd_repo if cwd_repo is not None and (scope is None or _same_path(cwd_repo, scope[0])) else None
 
     targets: list[tuple[Path, dict[str, Any]]] = []
     failures: list[str] = []
-    if not branches:
-        current = _standing_in(parkable)
-        # Bare inside a worktree: that worktree is the target (the common
-        # case, the task just finished and you're standing in it). For
-        # `park` even an already-parked one (re-parking refreshes the
-        # mark); for `unpark` only a parked one. Anything else (main
-        # checkout, no repo) falls to the picker, same as `remove`.
-        if current is not None and (not unpark or _is_parked(current[1])):
-            targets = [current]
+    remaining = list(branches or [])
+
+    if local is not None:
+        local_entries = git.worktree_entries(local)
+        _enrich_parked({local: local_entries}, {local: park_mod.parked_at(local)})
+        parkable_local = _parkable({local: local_entries})[local]
+        if not remaining:
+            # Bare inside a worktree: that worktree is the target (the
+            # common case, the task just finished and you're standing in
+            # it). For `park` even an already-parked one (re-parking
+            # refreshes the mark); for `unpark` only a parked one.
+            # Anything else (main checkout, no repo) falls to the picker.
+            current = _standing_in({local: parkable_local})
+            if current is not None and (not unpark or _is_parked(current[1])):
+                targets = [current]
         else:
+            for name in list(remaining):
+                if (match := _match_branch_in_repo(parkable_local, name)) is not None:
+                    targets.append((local, match))
+                    remaining.remove(name)
+
+    if (not branches and not targets) or remaining:
+        # Scan path: the picker for a bare invocation with no local
+        # target, global matching for branches that missed locally.
+        if scope is None:
+            scope = repo.scope_repos(None)
+        if not scope:
+            raise _fail("no known repos. Run 'coppice new' at least once, or pass --repo.")
+
+        worktrees_by_repo = git.worktree_entries_many(scope)
+        _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
+        parkable = _parkable(worktrees_by_repo)
+
+        if not branches:
             pickable = {r: [w for w in parkable[r] if _is_parked(w) == unpark] for r in scope}
+            if not unpark:
+                _enrich_dirty(pickable)
             note = (lambda w: f"parked {_parked_age_label(w)}") if unpark else None
-            branches = _pick_branches_interactively(
+            picked = _pick_branches_interactively(
                 scope, pickable, verb=verb, adjective="parked" if unpark else "parkable", note=note
             )
-            if not branches:
+            if not picked:
                 raise typer.Exit(1)
+            remaining = picked
 
-    if not targets:
-        # `branches` is non-None here: bare invocation either resolved the
-        # current worktree above or went through the picker (which exits
-        # rather than returning nothing).
-        for branch_name in branches or []:
-            matches = [(r, w) for r in scope for w in parkable[r] if w["branch"] == branch_name]
-            if not matches:
-                # Fall back to the worktree's directory name (the path's
-                # basename, what `ls` of the worktrees dir shows): it's
-                # often the name you actually see and type, especially
-                # when it differs from a long branch name. Branch matches
-                # always win on a collision, the mark is keyed by branch,
-                # so the branch reading is the canonical one.
-                matches = [
-                    (r, w) for r in scope for w in parkable[r] if w.get("path") and Path(w["path"]).name == branch_name
-                ]
-            if not matches:
-                err.print(
-                    f"[red]Error:[/] no parkable worktree for branch or directory '{branch_name}' found in scope."
-                )
-                failures.append(branch_name)
-                continue
-            if len(matches) > 1:
-                err.print(f"[red]Error:[/] branch '{branch_name}' exists in multiple repos, disambiguate with --repo:")
-                for r, _ in matches:
-                    err.print(f"  {_short_path(r)}")
-                failures.append(branch_name)
-                continue
-            targets.append(matches[0])
+        targets.extend(_resolve_targets_globally(scope, parkable, remaining, failures))
 
     console.print()
     if unpark:
@@ -1598,7 +1691,7 @@ def _park_unpark(
         return
 
     if not unpark and not yes:
-        dirty = [(r, w) for r, w in targets if _is_dirty(w)]
+        dirty = [(r, w) for r, w in targets if _target_dirty(w)]
         if dirty:
             console.print(f"{_plural(len(dirty), 'Worktree')} with uncommitted changes:")
             for r, w in dirty:
