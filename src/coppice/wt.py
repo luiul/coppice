@@ -59,29 +59,35 @@ def run(
     cwd: Path | None = None,
     check: bool = True,
     stream: bool = False,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     require_wt()
     cmd = ["wt"]
     if cwd is not None:
         cmd += ["-C", str(cwd)]
     cmd += args
-    # env is left unset: the child inherits this process's environment
-    # as-is (the streaming path makes one deliberate exception, see there).
+    # env stays unset (the child inherits this process's environment as-is)
+    # unless the caller passes a complete one, the only current caller-supplied
+    # case being `switch`'s editor gate (see `_switch_env`). The streaming path
+    # makes one further deliberate exception of its own, see there.
     if stream:
-        return _run_streaming(cmd, args, check)
+        return _run_streaming(cmd, args, check, env)
     # The machine-read, parallelized list path keeps both streams captured:
     # concurrent `wt` children would interleave on the shared terminal.
     proc = subprocess.run(
         cmd,
         capture_output=True,
         text=True,
+        env=env,
     )
     if check and proc.returncode != 0:
         raise WtCommandError(args, proc.returncode, proc.stderr)
     return proc
 
 
-def _run_streaming(cmd: list[str], wt_args: list[str], check: bool) -> subprocess.CompletedProcess[str]:
+def _run_streaming(
+    cmd: list[str], wt_args: list[str], check: bool, env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     """Run CMD with the child's stderr shown live on our own AND kept.
 
     stderr is `wt`'s human channel (hook progress, status lines, config
@@ -94,15 +100,17 @@ def _run_streaming(cmd: list[str], wt_args: list[str], check: bool) -> subproces
     the terminal chunk by chunk as it arrives. stdout stays piped either
     way, it carries the JSON we parse.
 
-    A pipe hides the terminal from `wt`, which would strip its colors, so
-    CLICOLOR_FORCE=1 is set when our own stderr is a terminal: the one
-    deliberate exception to the inherit-the-environment-as-is rule.
+    ENV is the complete child environment when the caller supplies one
+    (`switch`'s editor gate), inherited as-is otherwise. A pipe hides the
+    terminal from `wt`, which would strip its colors, so CLICOLOR_FORCE=1
+    is layered on top of either base when our own stderr is a terminal:
+    the one deliberate exception to the inherit-the-environment-as-is rule.
     """
     err_stream = sys.stderr  # capture once; test harnesses swap it per test
-    env = None
+    child_env = env
     if err_stream is not None and err_stream.isatty():
-        env = {**os.environ, "CLICOLOR_FORCE": "1"}
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        child_env = {**(env if env is not None else os.environ), "CLICOLOR_FORCE": "1"}
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=child_env)
     chunks: list[bytes] = []
 
     def _tee() -> None:
@@ -200,21 +208,46 @@ def remote_branch_exists(repo: Path, branch: str) -> bool:
     )
 
 
+def _switch_env(open_editor: bool) -> dict[str, str]:
+    """The complete child environment for a `wt switch`: inherited, minus
+    WORKTRUNK_NO_OPEN, with WORKTRUNK_NO_OPEN=1 added back unless OPEN_EDITOR.
+    Built as an explicit dict both ways (rather than merged ad hoc) so a
+    value inherited from our own environment can never leak through on the
+    open path.
+
+    The variable is read by `wt`'s post-start vscode hook (the dotfiles
+    worktrunk config), which owns the policy: WHICH editor "open" means
+    and what opening looks like live in config, not here. WORKTRUNK_AGENT=1
+    (agent mode) suppresses the window on the hook's side regardless.
+    """
+    env = {k: v for k, v in os.environ.items() if k != "WORKTRUNK_NO_OPEN"}
+    if not open_editor:
+        env["WORKTRUNK_NO_OPEN"] = "1"
+    return env
+
+
 def switch(
     repo: Path,
     branch: str,
     *,
     create: bool = False,
     base: str | None = None,
+    open_editor: bool = False,
 ) -> dict[str, Any]:
-    """Run `wt switch`, returning `{"action": "created"|"existing", "branch": ..., "path": ...}`."""
+    """Run `wt switch`, returning `{"action": "created"|"existing", "branch": ..., "path": ...}`.
+
+    OPEN_EDITOR=False (the default) sets WORKTRUNK_NO_OPEN=1 in the child's
+    environment so the post-start vscode hook skips opening a window,
+    `cop new` never steals focus with one. True lets the hook open one
+    (see `_switch_env`).
+    """
     args = ["switch"]
     if create:
         args.append("--create")
     if base is not None:
         args += ["--base", base]
     args += ["--no-cd", "--format", "json", branch]
-    proc = run(args, cwd=repo, stream=True)
+    proc = run(args, cwd=repo, stream=True, env=_switch_env(open_editor))
     return _load_json(proc.stdout)
 
 

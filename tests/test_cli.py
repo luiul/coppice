@@ -211,6 +211,35 @@ def test_new_creating_a_fresh_branch_never_prompts(tmp_path, monkeypatch):
     assert switch_calls[0]["create"] is True
 
 
+def test_new_suppresses_the_editor_window_by_default(tmp_path, monkeypatch):
+    """`cop new` must not steal focus with a VS Code window: the underlying
+    `wt switch` runs with the editor gate set, which wt's post-start vscode
+    hook (the dotfiles worktrunk config) reads and skips opening one."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+
+    assert result.exit_code == 0
+    assert switch_calls[0]["open_editor"] is False
+
+
+def test_new_open_opens_the_editor_window(tmp_path, monkeypatch):
+    """`cop new --open` asks for a window: the editor gate is off in the
+    `wt switch` child, so the post-start vscode hook opens one."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    _stub_wt(monkeypatch)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--open"])
+
+    assert result.exit_code == 0
+    assert switch_calls[0]["open_editor"] is True
+
+
 def test_new_resolves_the_actual_default_branch_as_base_when_creating(tmp_path, monkeypatch):
     """Without an explicit `--base`, `cmd_new` must resolve the repo's
     *actual* default branch itself (repo.default_branch) rather than

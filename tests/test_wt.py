@@ -4,6 +4,7 @@ stubbed one.
 """
 
 import io
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -113,15 +114,32 @@ def _capture_wt_popen(monkeypatch, *, stdout: bytes = b"", stderr: bytes = b"", 
     return calls
 
 
-def test_switch_lets_the_wt_subprocess_inherit_the_environment(monkeypatch, tmp_path):
-    """env is passed as None (inherit this process's environment untouched)
-    whenever our own stderr is not a terminal, so no CLICOLOR_FORCE leaks
-    into already-piped output."""
+def test_switch_sets_the_editor_gate_by_default(monkeypatch, tmp_path):
+    """A `wt switch` child runs with WORKTRUNK_NO_OPEN=1 in its environment
+    (everything else inherited unchanged) so the post-start vscode hook
+    skips opening a window: `cop new` must never steal focus by default."""
+    monkeypatch.delenv("WORKTRUNK_NO_OPEN", raising=False)
     calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}')
 
     wt.switch(tmp_path, "some-branch")
 
-    assert calls[0]["env"] is None
+    env = calls[0]["env"]
+    assert env["WORKTRUNK_NO_OPEN"] == "1"
+    assert {k: v for k, v in env.items() if k != "WORKTRUNK_NO_OPEN"} == dict(os.environ)
+
+
+def test_switch_open_editor_drops_the_gate_even_if_inherited(monkeypatch, tmp_path):
+    """open_editor=True removes WORKTRUNK_NO_OPEN from the child environment
+    entirely, including a value inherited from our own, so the hook opens a
+    window no matter how this process was invoked."""
+    monkeypatch.setenv("WORKTRUNK_NO_OPEN", "1")
+    calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}')
+
+    wt.switch(tmp_path, "some-branch", open_editor=True)
+
+    env = calls[0]["env"]
+    assert "WORKTRUNK_NO_OPEN" not in env
+    assert env == {k: v for k, v in os.environ.items() if k != "WORKTRUNK_NO_OPEN"}
 
 
 def test_streaming_forces_wt_colors_when_our_stderr_is_a_terminal(monkeypatch, tmp_path):

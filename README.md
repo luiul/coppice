@@ -24,7 +24,7 @@ turns that into a cross-repo workflow:
   any directory.
 - **Automate everything around a worktree.** `wt`'s lifecycle hooks turn
   `cop new` from an empty checkout into a ready dev environment: venv,
-  `.env`, editor window.
+  `.env`, editor window (off by default; `cop new --open` opts in).
 
 The long version, with diagrams: [docs/why-worktrees.md](docs/why-worktrees.md).
 How coppice relates to `wt`, understory, and canopy:
