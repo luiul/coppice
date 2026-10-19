@@ -7,15 +7,15 @@ Worktree branch: add-customer-id-column
 Created worktree for add-customer-id-column @ /Users/you/dbt-models/.worktrees/add-customer-id-column
 
 $ cop list
-Branch                      Created   Size    Working tree   Merge
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Branch                      Created   Modified   Size    Working tree   Merge
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 airflow-dags (main: master)
-  update-dag-schedule           1d    312M    clean          merged
-  debug-failing-pipeline        1w    298M    dirty          unmerged
+  update-dag-schedule           1d        20h    312M    clean          merged
+  debug-failing-pipeline        1w         3d    298M    dirty          unmerged
 
 dbt-models (main: main)
-  add-customer-id-column        2d    1.1G    clean          unmerged
-  fix-ingestion-retry           5d    1.0G    clean          merged
+  add-customer-id-column        2d        2d    1.1G    clean          unmerged
+  fix-ingestion-retry           5d        1w    1.0G    clean          merged
 
 4 worktrees in 2 repos · 2.7G on disk · 2 merged (cop clean --merged) · 1 dirty.
 5 more repos with no extra worktrees (show with: cop list --all)

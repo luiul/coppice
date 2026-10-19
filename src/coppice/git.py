@@ -153,6 +153,42 @@ def worktree_entries_many(repos: Iterable[Path]) -> dict[Path, list[dict[str, An
         return {r: f.result() for r, f in futures.items()}
 
 
+def newest_dirty_mtime(path: str | Path) -> float | None:
+    """The newest mtime among the worktree at PATH's changed and untracked
+    files, from one `git status --porcelain -z --untracked-files=all
+    --no-renames`. That combination is the "when did someone last work
+    here" half of `list`'s Modified column (the other half is the branch's
+    last-commit time, see cli._last_modified_ts). `-z` makes the records
+    NUL-separated with no quoting to undo, and `--no-renames` keeps each
+    side of what would be a rename its own record, so every record is
+    plain `XY <path>` and the path starts at byte 3. `--untracked-files=`
+    `all` enumerates files rather than naming their directories (a
+    directory's own mtime doesn't move when a file inside it is edited).
+    Stat failures (a deleted-in-worktree file, a broken symlink) skip the
+    file: they can't be the newest edit anyone made. None when git itself
+    fails or reports nothing."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(path), "status", "--porcelain", "-z", "--untracked-files=all", "--no-renames"],
+            capture_output=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    newest: float | None = None
+    for record in proc.stdout.split(b"\x00"):
+        if len(record) < 4:  # "XY " plus a non-empty path
+            continue
+        try:
+            mtime = os.stat(os.path.join(str(path), os.fsdecode(record[3:]))).st_mtime
+        except OSError:
+            continue
+        newest = mtime if newest is None or mtime > newest else newest
+    return newest
+
+
 def dirty_flags(path: str | Path) -> dict[str, bool]:
     """The worktree at PATH's dirtiness as the same flag dict `wt list`
     reports under `working_tree` (any flag set == dirty), from one

@@ -5,8 +5,10 @@ network is involved. The helpers are exercised end-to-end through the
 contracts (exit-code mapping, ancestor direction, abort tolerance).
 """
 
+import os
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
@@ -264,3 +266,31 @@ def test_dirty_flags_reads_a_non_repo_as_clean(tmp_path):
     plain = tmp_path / "plain"
     plain.mkdir()
     assert not any(git.dirty_flags(plain).values())
+
+
+def test_newest_dirty_mtime_takes_the_newest_change(tmp_path):
+    repo, _origin = _init_with_origin(tmp_path)
+    # A committed repo reads clean: nothing to report.
+    assert git.newest_dirty_mtime(repo) is None
+
+    old_ts = 1_700_000_000.0
+    (repo / "new-a.txt").write_text("uncommitted\n")
+    (repo / "new-b.txt").write_text("uncommitted\n")
+    os.utime(repo / "new-a.txt", (old_ts, old_ts))
+    fresh_ts = time.time() - 60
+    os.utime(repo / "new-b.txt", (fresh_ts, fresh_ts))
+
+    assert git.newest_dirty_mtime(repo) == pytest.approx(fresh_ts)
+
+
+def test_newest_dirty_mtime_counts_edits_to_tracked_files(tmp_path):
+    repo, _origin = _init_with_origin(tmp_path)
+    edit_ts = time.time() - 3600
+    (repo / "f.txt").write_text("edited\n")
+    os.utime(repo / "f.txt", (edit_ts, edit_ts))
+
+    assert git.newest_dirty_mtime(repo) == pytest.approx(edit_ts)
+
+
+def test_newest_dirty_mtime_reads_a_non_repo_as_unknown(tmp_path):
+    assert git.newest_dirty_mtime(tmp_path / "not-a-repo") is None

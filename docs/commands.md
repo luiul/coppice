@@ -38,7 +38,7 @@ cop unpark feat-a                         # follow-up arrived: back to active (s
 cop relocate                             # move mismatched worktrees (flagged '@ other-dir/' in cop list) back to their template paths
 cop relocate --dry-run                   # ...preview the moves, changing nothing
 cop relocate ~/dbt-models                # ...scoped to one repo
-cop list                                 # worktrees across every known repo (age, size, dirty/merge status)
+cop list                                 # worktrees across every known repo (age, last modified, size, dirty/merge status)
 cop list ~/dbt-models                    # ...just this one
 cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)
 cop list --verbose                       # ...with a column for each worktree's on-disk path
@@ -51,6 +51,7 @@ cop clean --dry-run                      # preview worktrees (not branches) olde
 cop clean --yes                          # remove them (skips dirty, parked, and open-PR worktrees)
 cop clean --merged                       # sweep every worktree on a merged branch instead, regardless of age
 cop clean --parked                       # sweep worktrees parked 7+ days ago (same dirty/open-PR safety rails)
+cop clean --modified --dry-run           # preview worktrees last modified 14+ days ago (fresh edits count as active)
 cop clean 3 --parked --dry-run           # preview worktrees parked 3+ days ago
 cop clean 7 --repo dbt-models --merged   # ...scoped to one repo, merged only
 cop status                               # is wt on PATH, table of the shared registry (worktree count, size, health)

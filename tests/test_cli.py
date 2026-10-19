@@ -9,6 +9,7 @@ fake `wt.list_worktrees`/`gh.open_prs` results rather than a real `wt`/`gh`
 install, so these pass in CI the same as locally.
 """
 
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -1161,6 +1162,101 @@ def test_list_verbose_shows_paths(tmp_path, monkeypatch):
     assert cli._short_path(repo_dir, max_len=40) in flat_output
 
 
+def test_list_modified_column_reads_the_commit_age_for_clean_worktrees(tmp_path, monkeypatch):
+    """A clean worktree's last modification is its last commit: the
+    Modified column must show the commit's age, and it must never cost a
+    git status subprocess (clean is the common case, see
+    `_last_modified_ts`)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feature", tmp_path / "feature", commit_ts=now - 2 * 86400),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    assert "Modified" in result.output
+    flat_output = result.output.replace("\n", "")
+    assert "feature" in flat_output
+    # the feature row's Modified cell: 2 days since its last commit
+    assert " 2d " in flat_output
+
+
+def test_list_modified_column_reads_the_newest_dirty_mtime(tmp_path, monkeypatch):
+    """A dirty worktree with fresh uncommitted edits must not read as
+    stale just because its HEAD is old: Modified takes the newest mtime
+    among the changed or untracked files when that is later than the
+    commit."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    scratch = repo_dir / "scratch.txt"
+    scratch.write_text("uncommitted")
+    edit_ts = now - 3 * 3600
+    os.utime(scratch, (edit_ts, edit_ts))
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("dirty", repo_dir, commit_ts=now - 5 * 86400, dirty=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    flat_output = result.output.replace("\n", "")
+    # the dirty row's Modified cell: 3 hours since the edit, not 5 days
+    # since the commit
+    assert " 3h " in flat_output
+
+
+def test_list_modified_column_marks_stale_rows(tmp_path, monkeypatch):
+    """A stale (dangling) reference has no directory left to walk: its
+    Modified cell reads '-', the same 'moot once the directory is gone'
+    convention its other columns follow."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    entries = [_entry("main", repo_dir, is_main=True), _entry("stale-branch", tmp_path / "gone", stale=True)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    flat_output = result.output.replace("\n", "")
+    assert "stale-branch" in flat_output
+    # the stale row's Modified cell: '-' (moot once the directory is gone)
+    assert cli._modified_cell(entries[1]) == "[dim]-[/]"
+
+
+def test_list_json_includes_last_modified(tmp_path, monkeypatch):
+    """--json carries the same value the column shows, as a `last_modified`
+    unix timestamp (None when nothing is known)."""
+    import json
+
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feature", tmp_path / "feature", commit_ts=now - 2 * 86400),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    data = json.loads(result.stdout)
+    feature = next(e for e in data if e["branch"] == "feature")
+    assert feature["last_modified"] == now - 2 * 86400
+    assert "last_modified" in data[0]
+
+
 def test_remove_without_wt_fails_clearly(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _hide_wt(monkeypatch)
@@ -2142,6 +2238,84 @@ def test_clean_merged_and_parked_are_mutually_exclusive():
 
     assert result.exit_code != 0
     assert "mutually exclusive" in result.output
+
+
+def test_clean_modified_is_mutually_exclusive_with_the_other_modes():
+    for args in (["--modified", "--merged"], ["--modified", "--parked"]):
+        result = runner.invoke(app, ["clean", *args])
+
+        assert result.exit_code != 0, args
+        assert "mutually exclusive" in result.output
+
+
+def test_clean_modified_sweeps_untouched_worktrees(tmp_path, monkeypatch):
+    """--modified reinterprets DAYS as inactivity: an old worktree nobody
+    has touched since its last commit is removable, while one with fresh
+    uncommitted edits (newest dirty-file mtime within DAYS) stays kept even
+    though its directory and commit are both old, and the parked, dirty,
+    and open-PR safety rails still apply."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch, which={"gh": "/usr/bin/gh"})
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    # fresh uncommitted edits inside the real repo: 3 days old, so the
+    # worktree is active and must survive the 14d inactivity sweep.
+    scratch = repo_dir / "scratch.txt"
+    scratch.write_text("uncommitted")
+    edit_ts = now - 3 * 86400
+    os.utime(scratch, (edit_ts, edit_ts))
+
+    entries = [
+        _entry("abandoned", tmp_path / "abandoned", commit_ts=now - 30 * 86400),
+        _entry("fresh-edits", repo_dir, commit_ts=now - 30 * 86400, dirty=True),
+        _entry("dirty-and-idle", tmp_path / "idle", commit_ts=now - 30 * 86400, dirty=True),
+        _entry("still-young", tmp_path / "young", commit_ts=now - 3 * 86400),
+        _entry("parked-idle", tmp_path / "parked", commit_ts=now - 30 * 86400),
+        _entry("pr-idle", tmp_path / "pr", commit_ts=now - 30 * 86400),
+        _entry("main", repo_dir, is_main=True),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    park.park(repo_dir, "parked-idle", at=now - 30 * 86400)
+    monkeypatch.setattr(
+        gh, "open_prs", lambda _repo, branches: {"pr-idle": "#42 Some PR"} if "pr-idle" in branches else {}
+    )
+
+    result = runner.invoke(
+        app, ["clean", "--repo", str(repo_dir), "--modified", "--dry-run", "--verbose"], env={"COLUMNS": "160"}
+    )
+
+    assert result.exit_code == 0, result.output
+    flat = result.output.replace("\n", "")
+    assert "last modified more than 14d ago" in flat
+    # untouched for 30d: removable
+    assert "1mo  abandoned" in flat and "1 removable" in flat
+    # fresh uncommitted edits: kept as active, whatever its directory age
+    assert "fresh-edits" in flat and "modified less than 14d ago" in flat
+    # old uncommitted changes never revisited: the dirty rail still skips it
+    assert "dirty-and-idle" in flat and "uncommitted changes" in flat
+    # a recent commit (3d) counts as recent modification
+    assert "still-young" in flat and "modified less than 14d ago" in flat
+    assert "parked-idle" in flat and "unpark" in flat
+    assert "pr-idle" in flat and "open PR #42 Some PR" in flat
+    assert "2 modified within 14d" in flat
+    assert "Dry run, nothing removed." in flat
+
+
+def test_clean_modified_explicit_days(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [_entry("idle-branch", tmp_path / "idle", commit_ts=now - 30 * 86400)]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+
+    result = runner.invoke(app, ["clean", "3", "--repo", str(repo_dir), "--modified", "--dry-run"])
+
+    assert result.exit_code == 0, result.output
+    assert "last modified more than 3d ago" in result.output
+    assert "1 removable" in result.output
 
 
 def test_remove_drops_the_parked_mark_when_the_branch_went_with_it(tmp_path, monkeypatch):

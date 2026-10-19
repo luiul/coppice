@@ -637,6 +637,56 @@ def _age_cell(entry: dict[str, Any]) -> str:
     return f"[{_STYLE_STALE}]{label}[/]" if _is_stale(entry) else label
 
 
+def _last_modified_ts(entry: dict[str, Any]) -> float | None:
+    """Epoch time ENTRY's worktree was last modified: the later of its
+    branch's last-commit time and the newest mtime among its changed or
+    untracked files (git.newest_dirty_mtime). That combination answers
+    "when did someone last work here", which neither input does alone: a
+    clean worktree's last modification is its last commit, while one with
+    fresh uncommitted edits must not read as stale just because its HEAD
+    is old. Only a dirty worktree needs the file walk, so the common case
+    pays no extra subprocess. None when nothing is known (a stale entry's
+    directory is already gone; no commit time and a failed walk).
+
+    The same definition understory's own applyModifiedTime applies, so
+    the two tools must not drift apart here.
+    """
+    if _is_stale(entry):
+        return None
+    commit_ts = entry.get("commit", {}).get("timestamp") or 0
+    if not _is_dirty(entry):
+        return float(commit_ts) if commit_ts else None
+    newest = git.newest_dirty_mtime(entry["path"])
+    if newest is None:
+        return float(commit_ts) if commit_ts else None
+    return max(newest, float(commit_ts)) if commit_ts else newest
+
+
+def _modified_seconds(entry: dict[str, Any]) -> float | None:
+    """Seconds since ENTRY's worktree was last modified (see
+    `_last_modified_ts`): the inactivity age `clean --modified` sweeps by.
+    Answers "when did someone last work here", where `_age_seconds`
+    answers "how old is the directory": a long-lived worktree with fresh
+    uncommitted edits is active, not abandoned, and must survive an
+    age-based sweep. None when nothing is known.
+    """
+    ts = _last_modified_ts(entry)
+    return time.time() - ts if ts is not None else None
+
+
+def _modified_cell(entry: dict[str, Any]) -> str:
+    """Rich-markup Modified cell for worktree tables: `_humanize_age`'s
+    compact label of the time since `_last_modified_ts`, '-' for a stale
+    entry (its directory is already gone, and `clean`/`remove` are its
+    answers, not how old it is), '?' when nothing is known, the same
+    convention `_age_label` uses.
+    """
+    if _is_stale(entry):
+        return "[dim]-[/]"
+    ts = _last_modified_ts(entry)
+    return _humanize_age(max(0.0, time.time() - ts)) if ts is not None else "?"
+
+
 def _is_dirty(entry: dict[str, Any]) -> bool:
     wtree = entry.get("working_tree", {})
     return any(wtree.get(k) for k in ("staged", "modified", "untracked", "deleted", "renamed"))
@@ -807,8 +857,9 @@ def _worktree_cells(
 ) -> tuple[list[str], int | None]:
     """One table row for a worktree: branch ('current' conveyed by the
     bold-green style instead of its own column, one less repeated 'current'
-    per row), age, optionally on-disk size and (VERBOSE) path, working-tree
-    cleanliness, and merge status. Returns the cells plus the entry's size
+    per row), age, last-modified age, optionally on-disk size and (VERBOSE)
+    path, working-tree cleanliness, and merge status. Returns the cells
+    plus the entry's size
     in KB (None when unknown or not requested), so callers can roll up
     totals without walking anything twice.
 
@@ -860,7 +911,7 @@ def _worktree_cells(
         age_cell = f"{_age_label(w)} · follow-up"
 
     size_kb = _worktree_size_kb(w, size_cache) if show_size else None
-    cells = [branch_cell, age_cell]
+    cells = [branch_cell, age_cell, _modified_cell(w)]
     if show_size:
         cells.append(sizes.human_kb(size_kb) if size_kb is not None else "-")
     if verbose:
@@ -896,6 +947,7 @@ def _worktrees_table(
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Branch")
     table.add_column("Created", justify="right")
+    table.add_column("Modified", justify="right")
     if show_size:
         table.add_column("Size", justify="right")
     table.add_column("Working tree")
@@ -1016,6 +1068,7 @@ def _render_list(
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
     table.add_column("Branch")
     table.add_column("Created", justify="right")
+    table.add_column("Modified", justify="right")
     if show_size:
         table.add_column("Size", justify="right")
     if verbose:
@@ -1030,7 +1083,7 @@ def _render_list(
         heading = _list_section_heading(repo_root, main_entry)
         if empty:
             heading = f"{heading} {_one_liner_note(main_entry)}"
-        cells = [heading, ""]
+        cells = [heading, "", ""]
         if show_size:
             cells.append("")
         if verbose:
@@ -1120,7 +1173,7 @@ def cmd_list(
         merged: list[dict[str, Any]] = []
         for repo_root in repos:
             for entry in worktrees_by_repo[repo_root]:
-                merged.append({**entry, "repo": repo_root.name})
+                merged.append({**entry, "repo": repo_root.name, "last_modified": _last_modified_ts(entry)})
         # Plain print, not console.print: Rich soft-wraps at console width
         # (80 columns when stdout is a pipe), inserting literal newlines
         # inside JSON strings, 'cop list --json | jq' used to get invalid
@@ -1865,6 +1918,15 @@ def cmd_clean(
             "regardless of worktree age (still skips dirty worktrees and ones with an open PR).",
         ),
     ] = False,
+    modified: Annotated[
+        bool,
+        typer.Option(
+            "--modified",
+            help="Instead sweep by inactivity: remove worktrees last modified at least DAYS days ago "
+            "(default DAYS: 14), regardless of creation age (still skips dirty worktrees and ones with "
+            "an open PR).",
+        ),
+    ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", "-n", help="List candidates without removing anything.")
     ] = False,
@@ -1880,9 +1942,13 @@ def cmd_clean(
     step after 'coppice list'.
 
     Pass --merged/-m to instead remove every merged worktree in scope
-    regardless of age, or --parked/-p to sweep worktrees parked (cop park)
-    at least DAYS days ago (default: 7), DAYS is reinterpreted in those
-    modes. --merged and --parked are mutually exclusive.
+    regardless of age, --parked/-p to sweep worktrees parked (cop park)
+    at least DAYS days ago (default: 7), or --modified to sweep by
+    inactivity: worktrees last modified at least DAYS days ago (default:
+    14) regardless of creation age, so a worktree with fresh uncommitted
+    edits stays kept even when its directory is old. DAYS is reinterpreted
+    in those modes. --merged, --parked, and --modified are mutually
+    exclusive.
 
     Scope is every known repo plus the repo you're standing in ("all
     repos"), same as 'coppice list'/'coppice remove' default, or restrict to
@@ -1899,6 +1965,8 @@ def cmd_clean(
     """
     if merged and parked:
         raise _fail("--merged and --parked are mutually exclusive.")
+    if modified and (merged or parked):
+        raise _fail("--modified is mutually exclusive with --merged and --parked.")
 
     try:
         scope = repo.scope_repos(repo_path)
@@ -1923,6 +1991,8 @@ def cmd_clean(
         console.print(f"Scanning {_plural(len(scope), 'repo')} for merged worktrees (any age)...")
     elif parked:
         console.print(f"Scanning {_plural(len(scope), 'repo')} for worktrees parked at least {days}d ago...")
+    elif modified:
+        console.print(f"Scanning {_plural(len(scope), 'repo')} for worktrees last modified more than {days}d ago...")
     else:
         console.print(f"Scanning {_plural(len(scope), 'repo')} for worktrees older than {days}d...")
 
@@ -2002,7 +2072,7 @@ def cmd_clean(
                     )
                 continue
 
-            seconds = _age_seconds(w)
+            seconds = _modified_seconds(w) if modified else _age_seconds(w)
             age_label = _humanize_age(seconds) if seconds is not None else "?"
 
             if not parked and _effectively_parked(w):
@@ -2058,14 +2128,21 @@ def cmd_clean(
                         )
                     continue
             else:
+                # Removable = last modified at least DAYS ago (--modified) or
+                # created at least DAYS ago (default). The age/modified
+                # distinction is the whole point of --modified: a worktree
+                # with fresh uncommitted edits is active no matter how old
+                # its directory is.
                 if seconds is None:
                     if verbose:
-                        lines.append(f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](age unknown)[/]")
+                        unknown = "last modified unknown" if modified else "age unknown"
+                        lines.append(f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim]({unknown})[/]")
                     continue
                 if seconds < threshold_seconds:
                     n_young += 1
                     if verbose:
-                        lines.append(f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim](younger than {days}d)[/]")
+                        young = f"modified less than {days}d ago" if modified else f"younger than {days}d"
+                        lines.append(f"  [dim]keep[/]  {age_label:>5}  {branch_name}  [dim]({young})[/]")
                     continue
 
             if _is_dirty(w):
@@ -2166,9 +2243,10 @@ def cmd_clean(
             f"{unparked_note}{followup_note}{stale_note}."
         )
     else:
+        young_note = f", {n_young} modified within {days}d" if modified else f", {n_young} under {days}d old"
         console.print(
             f"Scanned {_plural(len(scope), 'repo')}, {_plural(n_worktrees, 'worktree')}: {len(candidates)} removable, "
-            f"{n_dirty} dirty, {n_pr} with an open PR{parked_note}, {n_young} under {days}d old{stale_note}."
+            f"{n_dirty} dirty, {n_pr} with an open PR{parked_note}{young_note}{stale_note}."
         )
 
     if open_windows:
