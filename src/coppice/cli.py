@@ -198,20 +198,11 @@ def cmd_new(
         bool,
         typer.Option("--yes", "-y", help="Skip the confirmation prompt when the branch already exists."),
     ] = False,
-    open_editor: Annotated[
-        bool,
-        typer.Option(
-            "--open",
-            "-o",
-            help="Open a VS Code window on the worktree (off by default; which editor opens is wt's post-start hook's choice, see the worktrunk config).",
-        ),
-    ] = False,
 ) -> None:
     """Create or reuse a worktree for the repo at PATH.
 
-    No VS Code window opens by default; pass --open/-o to open one. The
-    editor policy itself lives in wt's post-start vscode hook (the dotfiles
-    worktrunk config), this flag only signals intent to it.
+    Worktree setup belongs to wt's lifecycle hooks. This command does not
+    set an editor policy or pass an editor-specific environment override.
 
     When the branch (named via --branch, or the prompted-for description)
     already exists, locally or on the remote, asks before switching to its
@@ -274,7 +265,7 @@ def cmd_new(
         _freshen_explicit_base(repo_root, base)
 
     try:
-        result = _switch_with_recovery(repo_root, branch, create=create, base=base, open_editor=open_editor)
+        result = _switch_with_recovery(repo_root, branch, create=create, base=base)
     except wt.WtNotFoundError as exc:
         raise _fail(str(exc)) from exc
     except wt.WtCommandError as exc:
@@ -353,9 +344,7 @@ def _stdin_is_tty() -> bool:
     return sys.stdin.isatty()
 
 
-def _switch_with_recovery(
-    repo_root: Path, branch: str, *, create: bool, base: str | None, open_editor: bool
-) -> dict[str, Any]:
+def _switch_with_recovery(repo_root: Path, branch: str, *, create: bool, base: str | None) -> dict[str, Any]:
     """`wt.switch` plus one recovery: when the switch fails because BRANCH's
     worktree path is occupied by a worktree sitting on a different branch,
     offer the occupied-path remedies (`_recover_occupied_path`), then retry
@@ -363,7 +352,7 @@ def _switch_with_recovery(
     continues unchanged.
     """
     try:
-        return wt.switch(repo_root, branch, create=create, base=base, open_editor=open_editor)
+        return wt.switch(repo_root, branch, create=create, base=base)
     except wt.WtCommandError as exc:
         if not _recover_occupied_path(repo_root, branch, exc, create=create, base=base):
             raise
@@ -372,9 +361,7 @@ def _switch_with_recovery(
         # existing branch), while a relocate freed the path but created
         # nothing, so a brand-new branch still needs --create.
         retry_create = create and not wt.branch_exists(repo_root, branch)
-        return wt.switch(
-            repo_root, branch, create=retry_create, base=base if retry_create else None, open_editor=open_editor
-        )
+        return wt.switch(repo_root, branch, create=retry_create, base=base if retry_create else None)
 
 
 def _recover_occupied_path(

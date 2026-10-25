@@ -18,10 +18,23 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from coppice import cli, gh, git, park, repo, vscode, wt
+from coppice import cli, gh, git, park, repo, shell, vscode, wt
 from coppice.cli import app
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_cli_tests(tmp_path, monkeypatch):
+    """Keep registry scans and window checks away from the user's setup.
+
+    Individual tests can still supply a registry, working directory, or
+    window listing through their own monkeypatches.
+    """
+    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(vscode, "_run_osascript", lambda _script: None)
+    monkeypatch.delenv(shell.CD_FILE_ENV_VAR, raising=False)
 
 
 def _init_repo(path: Path) -> Path:
@@ -212,33 +225,53 @@ def test_new_creating_a_fresh_branch_never_prompts(tmp_path, monkeypatch):
     assert switch_calls[0]["create"] is True
 
 
-def test_new_suppresses_the_editor_window_by_default(tmp_path, monkeypatch):
-    """`cop new` must not steal focus with a VS Code window: the underlying
-    `wt switch` runs with the editor gate set, which wt's post-start vscode
-    hook (the dotfiles worktrunk config) reads and skips opening one."""
+@pytest.mark.parametrize("existing", [False, True])
+def test_new_passes_only_worktree_parameters(tmp_path, monkeypatch, existing):
+    """Creating and reusing worktrees pass no editor intent to wt."""
     repo_dir = _init_repo(tmp_path / "repo")
-    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     _stub_wt(monkeypatch)
-    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+    switch_calls = _stub_switch(monkeypatch, branch_exists=existing)
+    monkeypatch.setattr(repo, "default_branch", lambda _repo: "main")
 
-    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch"])
+    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "some-branch", "--yes"])
 
-    assert result.exit_code == 0
-    assert switch_calls[0]["open_editor"] is False
+    assert result.exit_code == 0, result.output
+    assert switch_calls == [
+        {"repo": repo_dir, "branch": "some-branch", "create": not existing, "base": None if existing else "main"}
+    ]
 
 
-def test_new_open_opens_the_editor_window(tmp_path, monkeypatch):
-    """`cop new --open` asks for a window: the editor gate is off in the
-    `wt switch` child, so the post-start vscode hook opens one."""
-    repo_dir = _init_repo(tmp_path / "repo")
-    monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
-    _stub_wt(monkeypatch)
-    switch_calls = _stub_switch(monkeypatch, branch_exists=False)
+@pytest.mark.parametrize("flag", ["--open", "-o"])
+@pytest.mark.parametrize("shortcut", [False, True])
+def test_new_rejects_removed_editor_flags_before_side_effects(tmp_path, monkeypatch, flag, shortcut):
+    """Removed flags fail during parsing, including the bare PATH shortcut."""
+    calls: list[str] = []
 
-    result = runner.invoke(app, ["new", str(repo_dir), "--branch", "fresh-branch", "--open"])
+    def unexpected(*args, **kwargs):
+        calls.append("side effect")
+        raise AssertionError("command ran before rejecting a removed option")
 
-    assert result.exit_code == 0
-    assert switch_calls[0]["open_editor"] is True
+    monkeypatch.setattr(repo, "resolve_repo_root", unexpected)
+    monkeypatch.setattr(wt, "require_wt", unexpected)
+    monkeypatch.setattr(wt, "switch", unexpected)
+    monkeypatch.setattr(repo, "register_repo", unexpected)
+    monkeypatch.setattr(shell, "write_cd_file", unexpected)
+    args = [str(tmp_path), "--branch", "some-branch", flag]
+
+    result = runner.invoke(app, args if shortcut else ["new", *args])
+
+    assert result.exit_code == 2, result.output
+    assert "No such option" in result.output
+    assert flag in result.output
+    assert calls == []
+
+
+def test_new_help_has_no_editor_options():
+    result = runner.invoke(app, ["new", "--help"])
+
+    assert result.exit_code == 0, result.output
+    assert "--open" not in result.output
+    assert "-o " not in result.output
 
 
 def test_new_resolves_the_actual_default_branch_as_base_when_creating(tmp_path, monkeypatch):
@@ -486,8 +519,8 @@ def _stub_occupied_switch(monkeypatch, occupier: dict[str, Any]) -> list[dict[st
     OCCUPIER's path, then succeeds (as it would after the in-place remedy)."""
     switch_calls: list[dict[str, Any]] = []
 
-    def fake_switch(repo_root, branch, **kwargs):
-        switch_calls.append({"repo": repo_root, "branch": branch, **kwargs})
+    def fake_switch(repo_root, branch, *, create, base):
+        switch_calls.append({"repo": repo_root, "branch": branch, "create": create, "base": base})
         if len(switch_calls) == 1:
             raise _collision_error(branch, Path(occupier["path"]), occupier["branch"])
         return {"action": "existing", "branch": branch, "path": occupier["path"]}
@@ -1240,6 +1273,7 @@ def test_list_json_includes_last_modified(tmp_path, monkeypatch):
 
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [repo_dir])
     now = 2_000_000_000.0
     monkeypatch.setattr(cli.time, "time", lambda: now)
     entries = [

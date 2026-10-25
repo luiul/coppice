@@ -114,32 +114,59 @@ def _capture_wt_popen(monkeypatch, *, stdout: bytes = b"", stderr: bytes = b"", 
     return calls
 
 
-def test_switch_sets_the_editor_gate_by_default(monkeypatch, tmp_path):
-    """A `wt switch` child runs with WORKTRUNK_NO_OPEN=1 in its environment
-    (everything else inherited unchanged) so the post-start vscode hook
-    skips opening a window: `cop new` must never steal focus by default."""
-    monkeypatch.delenv("WORKTRUNK_NO_OPEN", raising=False)
+@pytest.mark.parametrize("gate", [None, "1", "0"])
+@pytest.mark.parametrize("create,base", [(False, None), (True, "main"), (False, "develop")])
+def test_switch_inherits_environment_and_passes_worktree_args(monkeypatch, tmp_path, gate, create, base):
+    """Switch leaves hook policy to the caller's environment."""
+    if gate is None:
+        monkeypatch.delenv("WORKTRUNK_NO_OPEN", raising=False)
+    else:
+        monkeypatch.setenv("WORKTRUNK_NO_OPEN", gate)
+    monkeypatch.setenv("WORKTRUNK_AGENT", "1")
+    monkeypatch.setenv("COPPICE_TEST_INHERITED", "unchanged")
+    monkeypatch.setattr(wt.sys, "stderr", io.StringIO())
+    before = dict(os.environ)
     calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}')
 
-    wt.switch(tmp_path, "some-branch")
+    result = wt.switch(tmp_path, "some-branch", create=create, base=base)
 
-    env = calls[0]["env"]
-    assert env["WORKTRUNK_NO_OPEN"] == "1"
-    assert {k: v for k, v in env.items() if k != "WORKTRUNK_NO_OPEN"} == dict(os.environ)
+    expected = ["wt", "-C", str(tmp_path), "switch"]
+    if create:
+        expected.append("--create")
+    if base is not None:
+        expected += ["--base", base]
+    expected += ["--no-cd", "--format", "json", "some-branch"]
+    assert calls[0]["cmd"] == expected
+    assert calls[0]["env"] is None  # Popen inherits the environment without a replacement dict
+    assert dict(os.environ) == before
+    assert result == {"action": "created"}
 
 
-def test_switch_open_editor_drops_the_gate_even_if_inherited(monkeypatch, tmp_path):
-    """open_editor=True removes WORKTRUNK_NO_OPEN from the child environment
-    entirely, including a value inherited from our own, so the hook opens a
-    window no matter how this process was invoked."""
-    monkeypatch.setenv("WORKTRUNK_NO_OPEN", "1")
-    calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}')
+def test_switch_passes_no_environment_override_to_run(monkeypatch, tmp_path):
+    calls: list[tuple[list[str], dict[str, Any]]] = []
 
-    wt.switch(tmp_path, "some-branch", open_editor=True)
+    def fake_run(args, **kwargs):
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, 0, stdout='{"action": "existing"}', stderr="")
 
-    env = calls[0]["env"]
-    assert "WORKTRUNK_NO_OPEN" not in env
-    assert env == {k: v for k, v in os.environ.items() if k != "WORKTRUNK_NO_OPEN"}
+    monkeypatch.setattr(wt, "run", fake_run)
+
+    result = wt.switch(tmp_path, "some-branch")
+
+    assert calls == [(["switch", "--no-cd", "--format", "json", "some-branch"], {"cwd": tmp_path, "stream": True})]
+    assert result == {"action": "existing"}
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_run_preserves_explicit_environment_without_a_terminal(monkeypatch, tmp_path, stream):
+    monkeypatch.setattr(wt.sys, "stderr", io.StringIO())
+    env = {"COPPICE_TEST_EXPLICIT": "only this", "CLICOLOR_FORCE": "0"}
+    calls = _capture_wt_popen(monkeypatch) if stream else _capture_wt_subprocess(monkeypatch)
+
+    wt.run(["list"], cwd=tmp_path, stream=stream, env=env)
+
+    assert calls[0]["env"] is env
+    assert env == {"COPPICE_TEST_EXPLICIT": "only this", "CLICOLOR_FORCE": "0"}
 
 
 def test_streaming_forces_wt_colors_when_our_stderr_is_a_terminal(monkeypatch, tmp_path):
@@ -151,12 +178,31 @@ def test_streaming_forces_wt_colors_when_our_stderr_is_a_terminal(monkeypatch, t
         def isatty(self):
             return True
 
+    monkeypatch.setenv("WORKTRUNK_NO_OPEN", "0")
+    monkeypatch.setenv("CLICOLOR_FORCE", "0")
+    before = dict(os.environ)
     monkeypatch.setattr(wt.sys, "stderr", FakeTty())
     calls = _capture_wt_popen(monkeypatch, stdout=b'{"action": "created"}')
 
     wt.switch(tmp_path, "some-branch")
 
-    assert calls[0]["env"]["CLICOLOR_FORCE"] == "1"
+    assert calls[0]["env"] == {**before, "CLICOLOR_FORCE": "1"}
+    assert dict(os.environ) == before
+
+
+def test_streaming_layers_tty_colors_on_explicit_environment(monkeypatch, tmp_path):
+    class FakeTty(io.StringIO):
+        def isatty(self):
+            return True
+
+    monkeypatch.setattr(wt.sys, "stderr", FakeTty())
+    env = {"COPPICE_TEST_EXPLICIT": "only this", "CLICOLOR_FORCE": "0"}
+    calls = _capture_wt_popen(monkeypatch)
+
+    wt.run(["list"], cwd=tmp_path, stream=True, env=env)
+
+    assert calls[0]["env"] == {"COPPICE_TEST_EXPLICIT": "only this", "CLICOLOR_FORCE": "1"}
+    assert env == {"COPPICE_TEST_EXPLICIT": "only this", "CLICOLOR_FORCE": "0"}
 
 
 def test_switch_streams_wt_stderr_but_pipes_stdout_for_json(monkeypatch, tmp_path, capsys):
@@ -193,6 +239,7 @@ def test_list_worktrees_keeps_both_streams_captured(monkeypatch, tmp_path):
     wt.list_worktrees(tmp_path)
 
     assert calls[0]["capture_output"] is True
+    assert calls[0]["env"] is None
 
 
 def test_streamed_failure_raises_the_short_error_form(monkeypatch, tmp_path):

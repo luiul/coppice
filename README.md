@@ -22,9 +22,7 @@ turns that into a cross-repo workflow:
 - **Reach every repo, from anywhere.** A shared registry tracks every
   repo `coppice` has touched, so `list`/`clean` sweep all of them from
   any directory.
-- **Automate everything around a worktree.** `wt`'s lifecycle hooks turn
-  `cop new` from an empty checkout into a ready dev environment: venv,
-  `.env`, editor window (off by default; `cop new --open` opts in).
+- **Automate worktree setup.** `wt`'s lifecycle hooks turn `cop new` from an empty checkout into a ready dev environment: venv, `.env`, and other setup defined in your worktrunk config. Coppice does not choose or open an editor window.
 
 The long version, with diagrams: [docs/why-worktrees.md](docs/why-worktrees.md).
 How coppice relates to `wt`, understory, and canopy:
