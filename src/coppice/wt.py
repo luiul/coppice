@@ -211,13 +211,14 @@ def switch(
     *,
     create: bool = False,
     base: str | None = None,
+    config_overrides: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Run `wt switch`, returning `{"action": "created"|"existing", "branch": ..., "path": ...}`.
 
     Lifecycle hooks use the inherited environment. This wrapper sets no
     editor policy.
     """
-    args = ["switch"]
+    args = [arg for value in config_overrides for arg in ("--config-set", value)] + ["switch"]
     if create:
         args.append("--create")
     if base is not None:

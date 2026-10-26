@@ -63,6 +63,22 @@ Full reference, prompt behavior, and safety rails:
 [docs/commands.md](docs/commands.md). A full terminal session:
 [docs/demo.md](docs/demo.md).
 
+### Pi in Orca
+
+From an interactive shell, `cop new` starts or reuses Pi in an already watched Orca repo. Register the repo first with `owa` (your shell helper), or set its external worktree visibility to `show` with the [Orca CLI](https://onorca.dev). Orca must be running.
+
+```zsh
+owa ~/projects/personal/my-repo
+cop new ~/projects/personal/my-repo
+```
+
+Coppice uses wt to create the checkout and finish configured user setup before starting Pi. It keeps focus unchanged and sends no initial prompt. Direct wt calls, agent-marked calls, Herdr calls, and piped stdin do not trigger this handoff. Repo-file or system background setup needs an explicit readiness barrier; Coppice skips automatic launch rather than race it.
+
+Discovery waits at most 45 seconds. Setup has a 240-second deadline. If the handoff fails, the checkout remains and shell navigation still works. Retry with `cop orca /absolute/checkout/path`. The retry uses the pending setup or launch record and never blindly repeats an uncertain launch. Launch records live in `~/.cache/coppice/orca`.
+
+Orca 1.4.241 has a verified limitation: background CLI launch starts Pi, but does not bind its PTY to the sidebar's terminal state. Hide sleeping therefore hides the row until you open its terminal tab once. After that, idle Pi remains visible. Coppice does not switch focus to work around this. The automatic launch works, but automatic visibility with Hide sleeping remains blocked on Orca.
+
+
 ## Concepts
 
 ### Vocabulary

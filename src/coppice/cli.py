@@ -35,7 +35,7 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
-from coppice import confirm, gh, git, repo, shell, sizes, vscode, wt
+from coppice import confirm, gh, git, orca, repo, shell, sizes, vscode, wt
 from coppice import park as park_mod
 
 APP_HELP = """\
@@ -264,8 +264,22 @@ def cmd_new(
     elif create and base is not None:
         _freshen_explicit_base(repo_root, base)
 
+    setup = None
     try:
-        result = _switch_with_recovery(repo_root, branch, create=create, base=base)
+        setup = orca.prepare(repo_root)
+    except orca.HandoffError as exc:
+        console.print(str(exc), markup=False)
+
+    try:
+        switch_options = {"config_overrides": setup.suppress} if setup else {}
+        if setup:
+            console.print("Creating the checkout and finishing wt setup for Orca...")
+            result = orca.switch_ready(
+                setup, branch, base,
+                lambda: _switch_with_recovery(repo_root, branch, create=create, base=base, **switch_options),
+            )
+        else:
+            result = _switch_with_recovery(repo_root, branch, create=create, base=base)
     except wt.WtNotFoundError as exc:
         raise _fail(str(exc)) from exc
     except wt.WtCommandError as exc:
@@ -273,6 +287,8 @@ def cmd_new(
         # piling the short "exited N" form on top of it adds nothing.
         if exc.streamed:
             raise typer.Exit(1) from exc
+        raise _fail(str(exc)) from exc
+    except (orca.HandoffError, OSError) as exc:
         raise _fail(str(exc)) from exc
 
     repo.register_repo(repo_root)
@@ -301,6 +317,32 @@ def cmd_new(
 
     if result_path:
         shell.write_cd_file(Path(result_path))
+        if setup:
+            try:
+                target = Path(result_path)
+                if result.get("orca_setup_error"):
+                    raise orca.HandoffError(result["orca_setup_error"])
+                console.print("Waiting for Orca to resolve the checkout...")
+                console.print(orca.handoff(target))
+            except (orca.HandoffError, OSError) as exc:
+                console.print(f"Worktree exists, but the Orca handoff failed: {exc}", markup=False)
+                console.print(f"Retry: {orca.retry_command(Path(result_path))}", markup=False)
+
+
+@app.command("orca", rich_help_panel="Create")
+def cmd_orca(path: Annotated[str, typer.Argument(help="Existing checkout to start or reuse Pi in.")] = ".") -> None:
+    """Retry the Orca handoff for an existing checkout, without creating a worktree."""
+    target = Path(path).expanduser().resolve()
+    try:
+        root = repo.resolve_repo_root(target)
+        setup = orca.prepare(root)
+        if setup is None:
+            raise orca.HandoffError("Use an interactive shell and run owa for this repo first.")
+        with orca.checkout_lock(root):
+            orca.resume_setup(setup, target)
+            console.print(orca.handoff(target))
+    except (orca.HandoffError, repo.RepoResolutionError, OSError) as exc:
+        raise _fail(str(exc)) from exc
 
 
 def _freshen_explicit_base(repo_root: Path, base: str) -> None:
@@ -344,7 +386,9 @@ def _stdin_is_tty() -> bool:
     return sys.stdin.isatty()
 
 
-def _switch_with_recovery(repo_root: Path, branch: str, *, create: bool, base: str | None) -> dict[str, Any]:
+def _switch_with_recovery(
+    repo_root: Path, branch: str, *, create: bool, base: str | None, config_overrides: tuple[str, ...] = ()
+) -> dict[str, Any]:
     """`wt.switch` plus one recovery: when the switch fails because BRANCH's
     worktree path is occupied by a worktree sitting on a different branch,
     offer the occupied-path remedies (`_recover_occupied_path`), then retry
@@ -352,7 +396,8 @@ def _switch_with_recovery(repo_root: Path, branch: str, *, create: bool, base: s
     continues unchanged.
     """
     try:
-        return wt.switch(repo_root, branch, create=create, base=base)
+        options = {"config_overrides": config_overrides} if config_overrides else {}
+        return wt.switch(repo_root, branch, create=create, base=base, **options)
     except wt.WtCommandError as exc:
         if not _recover_occupied_path(repo_root, branch, exc, create=create, base=base):
             raise
@@ -361,7 +406,7 @@ def _switch_with_recovery(repo_root: Path, branch: str, *, create: bool, base: s
         # existing branch), while a relocate freed the path but created
         # nothing, so a brand-new branch still needs --create.
         retry_create = create and not wt.branch_exists(repo_root, branch)
-        return wt.switch(repo_root, branch, create=retry_create, base=base if retry_create else None)
+        return wt.switch(repo_root, branch, create=retry_create, base=base if retry_create else None, **options)
 
 
 def _recover_occupied_path(
