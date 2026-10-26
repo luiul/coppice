@@ -1,6 +1,7 @@
 """Safety regressions with mocks and bounded, locally owned subprocesses."""
 
 import contextlib
+import hashlib
 import json
 import multiprocessing
 import os
@@ -23,6 +24,7 @@ _RUN = orca._run
 def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "state")
     monkeypatch.setattr(orca, "_orca", Mock(side_effect=AssertionError("Unexpected Orca command")))
+    monkeypatch.setattr(orca, "_focus_pi", Mock())
     monkeypatch.setattr(orca, "_run", Mock(side_effect=AssertionError("Unexpected subprocess")))
     monkeypatch.setattr(orca, "manual_invocation", lambda: True)
     monkeypatch.setattr(orca.shutil, "which", lambda _name: "/fake/orca")
@@ -58,6 +60,13 @@ def _lock_worker(state_root, checkout, action, entered, release, completed, resu
     path = Path(checkout)
     orca._run = Mock(side_effect=AssertionError("Unexpected subprocess"))
 
+    def focus(handle, target):
+        assert (handle, target) == ("terminal-1", path)
+        assert release.is_set(), "Focus overlapped setup"
+        assert not orca._setup_path(path).exists(), "Focus preceded readiness"
+
+    orca._focus_pi = Mock(side_effect=focus)
+
     def finish(_self, target, _branch, _base):
         assert target == path
         if action == "hold_setup":
@@ -81,7 +90,8 @@ def _lock_worker(state_root, checkout, action, entered, release, completed, resu
         else:
             entered.set()
             if action == "handoff":
-                assert orca.handoff(path).startswith("Reused")
+                assert orca.handoff(path) == "Reused Pi and opened its worktree in Orca."
+                orca._focus_pi.assert_called_once_with("terminal-1", path)
             elif action == "resume_setup":
                 orca.resume_setup(setup, path)
             else:
@@ -251,6 +261,102 @@ def test_malformed_nested_launch_raises_handoff_error_and_preserves_pending(monk
         "operationId": "operation-1",
         "pending": True,
     }
+
+
+@pytest.mark.parametrize("operation_id", [None, "earlier-operation"])
+@pytest.mark.parametrize("code", ["selector_not_found", "transport_unknown", "command_failed"])
+def test_reused_pi_focus_failure_preserves_state_and_never_launches(monkeypatch, checkout, operation_id, code):
+    digest = hashlib.sha256(os.fsencode(checkout)).hexdigest()
+    record = orca.STATE_ROOT / f"{digest}.json"
+    orca.STATE_ROOT.mkdir()
+    state = {"path": str(checkout), "pending": True}
+    if operation_id:
+        state["operationId"] = operation_id
+    record.write_text(json.dumps(state))
+    before = record.read_text()
+    query = Mock(return_value=_live_terminal(checkout))
+    monkeypatch.setattr(orca, "_orca", query)
+    error = orca.OrcaError(code, "Focus failed")
+    orca._focus_pi.side_effect = error
+
+    for _ in range(2):
+        with pytest.raises(orca.OrcaError) as caught:
+            orca.handoff(checkout)
+        assert caught.value is error
+        assert record.read_text() == before
+    assert query.call_count == 2
+    assert orca._focus_pi.call_count == 2
+    for call in query.call_args_list:
+        assert call.args == (["terminal", "list", "--worktree", f"path:{checkout}"],)
+    for call in orca._focus_pi.call_args_list:
+        assert call.args == ("terminal-1", checkout)
+
+
+@pytest.mark.parametrize("operation_id", [None, "operation-1"])
+def test_new_pi_focus_failure_preserves_state_and_reuses_on_retry(monkeypatch, checkout, operation_id):
+    result = {"outcome": {"kind": "terminal", "handle": "launch-reply-handle"}}
+    if operation_id:
+        result["operationId"] = operation_id
+    query = Mock(side_effect=[{"terminals": []}, result, _live_terminal(checkout), _live_terminal(checkout)])
+    monkeypatch.setattr(orca, "_orca", query)
+    error = orca.OrcaError("selector_not_found", "Focus failed")
+    orca._focus_pi.side_effect = [error, None]
+
+    with pytest.raises(orca.OrcaError) as caught:
+        orca.handoff(checkout)
+    assert caught.value is error
+    records = list(orca.STATE_ROOT.glob("*.json"))
+    assert len(records) == 1
+    expected = {"path": str(checkout), "pending": True}
+    if operation_id:
+        expected["operationId"] = operation_id
+    assert json.loads(records[0].read_text()) == expected
+    assert query.call_count == 3
+    orca._focus_pi.assert_called_once_with("terminal-1", checkout)
+
+    assert orca.handoff(checkout) == "Reused Pi and opened its worktree in Orca."
+    assert not records[0].exists()
+    assert query.call_count == 4
+    assert [call.args[0][:2] for call in query.call_args_list] == [
+        ["terminal", "list"], ["agent", "launch"], ["terminal", "list"], ["terminal", "list"],
+    ]
+    assert orca._focus_pi.call_count == 2
+
+
+@pytest.mark.parametrize("operation_id", [None, "operation-1"])
+def test_focus_failure_without_live_pi_blocks_fresh_launch_retry(monkeypatch, checkout, operation_id):
+    launch = ["agent", "launch", "--agent", "pi", "--worktree", f"path:{checkout}", "--surface", "terminal"]
+    result = {"outcome": {"kind": "terminal", "handle": "launch-reply-handle"}}
+    if operation_id:
+        result["operationId"] = operation_id
+    values = [{"terminals": []}, result, _live_terminal(checkout), {"terminals": []}]
+    if operation_id:
+        values.append(orca.OrcaError("transport_unknown", "Retry uncertain"))
+    query = Mock(side_effect=values)
+    monkeypatch.setattr(orca, "_orca", query)
+    error = orca.OrcaError("transport_unknown", "Focus failed")
+    orca._focus_pi.side_effect = error
+
+    with pytest.raises(orca.OrcaError, match="Focus failed"):
+        orca.handoff(checkout)
+    records = list(orca.STATE_ROOT.glob("*.json"))
+    assert len(records) == 1
+    before = json.loads(records[0].read_text())
+    expected = {"path": str(checkout), "pending": True}
+    if operation_id:
+        expected["operationId"] = operation_id
+    assert before == expected
+
+    with pytest.raises(orca.HandoffError, match="Retry uncertain" if operation_id else "earlier launch result is unknown"):
+        orca.handoff(checkout)
+    assert json.loads(records[0].read_text()) == before
+    assert query.call_args_list[1].args == (launch,)
+    if operation_id:
+        assert query.call_count == 5
+        assert query.call_args_list[4].args == ([*launch, "--retry-launch", operation_id],)
+    else:
+        assert query.call_count == 4
+    orca._focus_pi.assert_called_once_with("terminal-1", checkout)
 
 
 def test_run_timeout_bounds_drain_of_escaped_owned_pipe_holder(tmp_path):

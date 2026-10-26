@@ -307,6 +307,11 @@ def _live_pi(payload: dict[str, Any], path: Path) -> str | None:
     return None
 
 
+def _focus_pi(handle: str, path: Path) -> None:
+    """Open the verified Pi terminal so Orca binds it and keeps its row awake."""
+    _orca(["terminal", "switch", "--terminal", handle], cwd=path)
+
+
 def _operation_id(value: Any) -> str | None:
     if isinstance(value, dict):
         for key, item in value.items():
@@ -357,8 +362,9 @@ def handoff(path: Path) -> str:
                 time.sleep(min(0.5, max(0, deadline - time.monotonic())))
         handle = _live_pi(terminals, path)
         if handle:
+            _focus_pi(handle, path)
             state_path.unlink(missing_ok=True)
-            return "Reused live Pi in Orca (focus unchanged). Hide sleeping may hide it until its tab is opened once."
+            return "Reused Pi and opened its worktree in Orca."
         args = ["agent", "launch", "--agent", "pi", "--worktree", f"path:{path}", "--surface", "terminal"]
         if state:
             operation_id = state.get("operationId")
@@ -391,8 +397,10 @@ def handoff(path: Path) -> str:
         while time.monotonic() < deadline:
             terminals = _orca(["terminal", "list", "--worktree", f"path:{path}"], cwd=path,
                               timeout=min(CALL_TIMEOUT, max(0.1, deadline - time.monotonic())))
-            if _live_pi(terminals, path):
+            handle = _live_pi(terminals, path)
+            if handle:
+                _focus_pi(handle, path)
                 state_path.unlink(missing_ok=True)
-                return "Started Pi in Orca (focus unchanged). Hide sleeping may hide it until its tab is opened once."
+                return "Started Pi and opened its worktree in Orca."
             time.sleep(0.25)
         raise HandoffError("Orca accepted the launch, but Pi is not yet confirmed live. The launch record was preserved.")

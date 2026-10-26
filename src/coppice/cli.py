@@ -319,11 +319,10 @@ def cmd_new(
         shell.write_cd_file(Path(result_path))
         if setup:
             try:
-                target = Path(result_path)
                 if result.get("orca_setup_error"):
                     raise orca.HandoffError(result["orca_setup_error"])
-                console.print("Waiting for Orca to resolve the checkout...")
-                console.print(orca.handoff(target))
+                console.print("Opening Pi in Orca...")
+                console.print(orca.handoff(Path(result_path)))
             except (orca.HandoffError, OSError) as exc:
                 console.print(f"Worktree exists, but the Orca handoff failed: {exc}", markup=False)
                 console.print(f"Retry: {orca.retry_command(Path(result_path))}", markup=False)
@@ -331,7 +330,7 @@ def cmd_new(
 
 @app.command("orca", rich_help_panel="Create")
 def cmd_orca(path: Annotated[str, typer.Argument(help="Existing checkout to start or reuse Pi in.")] = ".") -> None:
-    """Retry the Orca handoff for an existing checkout, without creating a worktree."""
+    """Retry the Orca handoff and focus Pi, without creating a worktree."""
     target = Path(path).expanduser().resolve()
     try:
         root = repo.resolve_repo_root(target)
