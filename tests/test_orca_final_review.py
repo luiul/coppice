@@ -8,10 +8,10 @@ from unittest.mock import Mock, patch
 import pytest
 from typer.testing import CliRunner
 
-from coppice import cli, orca, repo, shell, wt
+from coppice import cli, orca, repo, shell, workflow, wt
 
 runner = CliRunner()
-_RUN = orca._run
+_RUN = workflow._run
 BRANCH = "feature/final-review"
 BASE = "develop"
 
@@ -43,6 +43,7 @@ def recovery(monkeypatch, tmp_path):
         switch=Mock(return_value={"action": "existing", "path": str(root)}),
     )
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "isolated-orca-state")
+    monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "isolated-orca-state")
     monkeypatch.setattr(
         orca, "prepare_workflow", lambda actual_root: setup if actual_root == root else pytest.fail("Wrong repo root"),
     )
@@ -99,7 +100,7 @@ def recovery(monkeypatch, tmp_path):
         }}
 
     monkeypatch.setattr(orca.Setup, "finish", finish)
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     monkeypatch.setattr(orca, "_orca", command)
     return state
 
@@ -110,7 +111,7 @@ def _interrupt_creation(state):
         assert not orca._setup_path(state.root).exists()
         raise KeyboardInterrupt("Checkout exists, but its creation reply was interrupted")
 
-    with patch.object(orca, "_branch_has_checkout", return_value=False), pytest.raises(KeyboardInterrupt):
+    with patch.object(workflow, "_branch_has_checkout", return_value=False), pytest.raises(KeyboardInterrupt):
         orca.switch_ready(state.setup, BRANCH, BASE, interrupted_switch)
     assert orca._branch_has_checkout(state.root, BRANCH)
     assert json.loads(orca._intent_path(state.root, BRANCH).read_text())["base"] == BASE
@@ -141,8 +142,8 @@ def test_interrupted_existing_reuse_writes_no_intent_or_repeats_setup(monkeypatc
     state.switch.reset_mock()
     finish = Mock(side_effect=AssertionError("Existing checkout must not repeat setup"))
     resume = Mock(side_effect=AssertionError("Existing checkout has no pending setup"))
-    monkeypatch.setattr(orca, "finish_setup", finish)
-    monkeypatch.setattr(orca, "resume_setup", resume)
+    monkeypatch.setattr(workflow, "finish_setup", finish)
+    monkeypatch.setattr(workflow, "resume_setup", resume)
 
     def interrupted_switch(*_args, **_kwargs):
         assert orca._branch_has_checkout(state.root, BRANCH)
@@ -202,12 +203,12 @@ def test_interrupted_creation_cli_retry_finishes_setup_before_pi(recovery, tmp_p
 def test_failed_setup_cli_retry_clears_intent_and_later_reuse_skips_hooks(recovery):
     state = recovery
     state.fail_next = True
-    with patch.object(orca, "_branch_has_checkout", return_value=False):
-        failed = orca.switch_ready(
+    with patch.object(workflow, "_branch_has_checkout", return_value=False):
+        failed = workflow.switch_ready(
             state.setup, BRANCH, BASE,
             Mock(return_value={"action": "created", "path": str(state.root), "base_branch": BASE}),
         )
-    assert failed["orca_setup_error"] == "Setup failed once"
+    assert failed["setup_error"] == "Setup failed once"
     assert orca._setup_path(state.root).exists()
     assert orca._intent_path(state.root, BRANCH).exists()
     assert state.events == ["setup"]
@@ -231,12 +232,12 @@ def test_orca_retry_keeps_saved_base_when_reusing_existing_branch(recovery, pend
     state = recovery
     if pending_setup_record:
         state.fail_next = True
-        with patch.object(orca, "_branch_has_checkout", return_value=False):
-            failed = orca.switch_ready(
+        with patch.object(workflow, "_branch_has_checkout", return_value=False):
+            failed = workflow.switch_ready(
                 state.setup, BRANCH, BASE,
                 Mock(return_value={"action": "created", "path": str(state.root), "base_branch": BASE}),
             )
-        assert failed["orca_setup_error"] == "Setup failed once"
+        assert failed["setup_error"] == "Setup failed once"
     else:
         _interrupt_creation(state)
     assert orca._setup_path(state.root).exists() is pending_setup_record

@@ -6,7 +6,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from coppice import orca
+from coppice import orca, workflow
 
 
 @pytest.fixture
@@ -51,7 +51,7 @@ def test_watch_failure_stops_workflow(monkeypatch, tmp_path, explicit, phase):
     replies.append(orca.OrcaError("failed", "stopped"))
     monkeypatch.setattr(orca, "_orca", Mock(side_effect=replies))
     prepare = Mock()
-    monkeypatch.setattr(orca, "prepare", prepare)
+    monkeypatch.setattr(workflow, "prepare", prepare)
     with pytest.raises(orca.OrcaError):
         orca.prepare_workflow(tmp_path)
     prepare.assert_not_called()
@@ -61,7 +61,7 @@ def test_workflow_watches_before_setup_preflight(monkeypatch, tmp_path, explicit
     events = []
     setup = orca.Setup(tmp_path, (), ())
     monkeypatch.setattr(orca, "watch", lambda root: events.append(("watch", root)))
-    monkeypatch.setattr(orca, "prepare", lambda root: events.append(("prepare", root)) or setup)
+    monkeypatch.setattr(workflow, "prepare", lambda root: events.append(("prepare", root)) or setup)
     assert orca.prepare_workflow(tmp_path) == setup
     assert events == [("watch", tmp_path), ("prepare", tmp_path)]
 
@@ -78,14 +78,14 @@ def test_workflow_requires_manual_call_before_watch(monkeypatch, tmp_path):
 def test_checkout_detection_uses_git_branch_not_directory_name(monkeypatch, tmp_path):
     output = f"worktree {tmp_path}/unrelated-name\0HEAD deadbeef\0branch refs/heads/feature/existing\0\0"
     command = Mock(return_value=subprocess.CompletedProcess([], 0, output, ""))
-    monkeypatch.setattr(orca, "_run", command)
+    monkeypatch.setattr(workflow, "_run", command)
     assert orca._branch_has_checkout(tmp_path, "feature/existing") is True
     assert orca._branch_has_checkout(tmp_path, "feature/missing") is False
     assert command.call_args.args[0] == ["git", "-C", str(tmp_path), "worktree", "list", "--porcelain", "-z"]
 
 
 def test_checkout_detection_failure_blocks_creation(monkeypatch, tmp_path):
-    monkeypatch.setattr(orca, "_run", Mock(return_value=subprocess.CompletedProcess([], 1, "", "failed")))
+    monkeypatch.setattr(workflow, "_run", Mock(return_value=subprocess.CompletedProcess([], 1, "", "failed")))
     with pytest.raises(orca.HandoffError, match="inspect existing worktrees"):
         orca._branch_has_checkout(tmp_path, "feature/existing")
 

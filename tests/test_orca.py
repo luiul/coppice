@@ -9,7 +9,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from coppice import orca
+from coppice import orca, workflow
 
 _ORCA = orca._orca
 _FOCUS_PI = orca._focus_pi
@@ -33,11 +33,13 @@ class Clock:
 def isolated(monkeypatch, tmp_path):
     """Unexpected commands fail rather than reaching a real Orca or wt."""
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(workflow, "_run", Mock(side_effect=AssertionError("Unexpected setup subprocess")))
     monkeypatch.setattr(orca, "_orca", Mock(side_effect=AssertionError("Unexpected Orca command")))
     monkeypatch.setattr(orca, "_focus_pi", Mock())
     monkeypatch.setattr(orca, "_run", Mock(side_effect=AssertionError("Unexpected subprocess")))
     monkeypatch.setattr(orca.shutil, "which", lambda name: "/fake/orca" if name == "orca" else None)
-    monkeypatch.setattr(orca.sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr(workflow.sys, "stdin", SimpleNamespace(isatty=lambda: True))
     for name in ("WORKTRUNK_AGENT", "HERDR_ENV", "HERDR_SOCKET_PATH"):
         monkeypatch.delenv(name, raising=False)
 
@@ -46,6 +48,7 @@ def isolated(monkeypatch, tmp_path):
 def clock(monkeypatch):
     value = Clock()
     monkeypatch.setattr(orca, "time", value)
+    monkeypatch.setattr(workflow, "time", value)
     return value
 
 
@@ -125,7 +128,7 @@ def hook_listing():
 def config_setup(monkeypatch, config, *, registration=None):
     query = replies(monkeypatch, registration or {"repo": {"externalWorktreeVisibility": "show"}})
     run = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(config), ""))
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     return query, run
 
 
@@ -148,7 +151,7 @@ def test_manual_invocation_allows_inactive_environment(monkeypatch, name):
 
 
 def test_prepare_skips_non_tty(monkeypatch, checkout):
-    monkeypatch.setattr(orca.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    monkeypatch.setattr(workflow.sys, "stdin", SimpleNamespace(isatty=lambda: False))
     assert orca.prepare(checkout) is None
     orca._orca.assert_not_called()
 
@@ -226,7 +229,7 @@ def test_prepare_rejects_project_file_background_hooks(monkeypatch, checkout, so
 )
 def test_prepare_invalid_config_fails_closed(monkeypatch, checkout, stdout, returncode):
     config_setup(monkeypatch, {})
-    orca._run.return_value = subprocess.CompletedProcess([], returncode, stdout, "secret stderr")
+    workflow._run.return_value = subprocess.CompletedProcess([], returncode, stdout, "secret stderr")
     with pytest.raises(orca.HandoffError, match="could not read wt setup configuration"):
         orca.prepare(checkout)
 
@@ -234,7 +237,7 @@ def test_prepare_invalid_config_fails_closed(monkeypatch, checkout, stdout, retu
 @pytest.mark.parametrize("error", [OSError("unavailable"), subprocess.TimeoutExpired("wt", 10)])
 def test_prepare_config_transport_failure(monkeypatch, checkout, error):
     config_setup(monkeypatch, {})
-    orca._run.side_effect = error
+    workflow._run.side_effect = error
     with pytest.raises(orca.HandoffError, match="could not read wt setup configuration"):
         orca.prepare(checkout)
 
@@ -254,7 +257,7 @@ def test_finish_runs_configured_global_then_project_hooks_foreground(monkeypatch
             return hook_listing()
         return subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     setup.finish(checkout, "feature/test", base)
     for index, overrides in enumerate(((override,), ("post-start=[]",))):
         prefix = ["wt", "-C", str(checkout)]
@@ -291,7 +294,7 @@ def test_finish_skips_only_empty_phases(monkeypatch, checkout, clock, global_hoo
             )
         return subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     orca.Setup(checkout.parent, (), (override,)).finish(checkout, "branch", None)
     expected = ["listing"]
     if global_hooks:
@@ -316,7 +319,7 @@ def test_finish_hook_failure_stops_and_hides_output(monkeypatch, checkout, clock
     success = subprocess.CompletedProcess([], 0, "", "")
     failure = subprocess.CompletedProcess([], 1, "secret stdout", "secret stderr")
     run = Mock(side_effect=[hook_listing(), success] * failed_step + [hook_listing(), failure])
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     with pytest.raises(orca.HandoffError, match="A wt setup hook failed") as caught:
         orca.Setup(checkout, (), ()).finish(checkout, "branch", None)
     assert "secret" not in str(caught.value)
@@ -329,7 +332,7 @@ def test_finish_hook_failure_stops_and_hides_output(monkeypatch, checkout, clock
 def test_finish_transport_failure_prevents_launch(monkeypatch, checkout, clock, error, failed_call):
     results = [hook_listing(), subprocess.CompletedProcess([], 0, "", "")] * 2
     run = Mock(side_effect=[*results[:failed_call], error])
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     with pytest.raises(orca.HandoffError, match="setup did not finish; Pi was not started"):
         orca.Setup(checkout, (), ()).finish(checkout, "branch", None)
     assert run.call_count == failed_call + 1
@@ -345,7 +348,7 @@ def test_finish_invalid_hook_listing_fails_closed(monkeypatch, checkout, clock, 
     success = subprocess.CompletedProcess([], 0, "", "")
     failure = subprocess.CompletedProcess([], returncode, stdout, "secret stderr")
     run = Mock(side_effect=[hook_listing(), success] * failed_phase + [failure])
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     with pytest.raises(orca.HandoffError, match="Could not read configured wt setup hooks") as caught:
         orca.Setup(checkout, (), ()).finish(checkout, "branch", None)
     assert "secret" not in str(caught.value)
@@ -362,7 +365,7 @@ def test_finish_uses_one_shared_deadline(monkeypatch, checkout, clock, exhausted
         clock.now += orca.SETUP_TIMEOUT - 5 * exhausted_call if len(calls) == exhausted_call + 1 else 5
         return hook_listing() if "show" in args else subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     with pytest.raises(orca.HandoffError, match="240-second deadline"):
         orca.Setup(checkout, (), ()).finish(checkout, "branch", None)
     assert clock.now == orca.SETUP_TIMEOUT
@@ -379,7 +382,7 @@ def test_finish_empty_phase_listing_uses_shared_deadline(monkeypatch, checkout, 
         return subprocess.CompletedProcess(args, 0, "[]", "")
 
     mock = Mock(side_effect=run)
-    monkeypatch.setattr(orca, "_run", mock)
+    monkeypatch.setattr(workflow, "_run", mock)
     with pytest.raises(orca.HandoffError, match="240-second deadline"):
         orca.Setup(checkout, (), ()).finish(checkout, "branch", None)
     mock.assert_called_once()
@@ -796,20 +799,20 @@ def test_handoff_pending_without_replay_id_blocks_fresh_launch(monkeypatch, chec
 
 def test_handoff_lock_contention_has_bounded_wait(monkeypatch, checkout, clock):
     lock = Mock(side_effect=BlockingIOError)
-    monkeypatch.setattr(orca.fcntl, "flock", lock)
-    with pytest.raises(orca.HandoffError, match="Another Orca handoff is still running"):
+    monkeypatch.setattr(workflow.fcntl, "flock", lock)
+    with pytest.raises(orca.HandoffError, match="Another orchestrator handoff is still running"):
         orca.handoff(checkout)
     assert clock.now == orca.DISCOVERY_TIMEOUT
     assert lock.call_count == 181
     assert len(clock.sleeps) == 180
-    assert all(call.args[1] == orca.fcntl.LOCK_EX | orca.fcntl.LOCK_NB for call in lock.call_args_list)
+    assert all(call.args[1] == workflow.fcntl.LOCK_EX | workflow.fcntl.LOCK_NB for call in lock.call_args_list)
     orca._orca.assert_not_called()
     assert not state_file(checkout).exists()
 
 
 def test_handoff_acquires_lock_after_contention(monkeypatch, checkout, clock):
     write_binding(checkout)
-    monkeypatch.setattr(orca.fcntl, "flock", Mock(side_effect=[BlockingIOError, None]))
+    monkeypatch.setattr(workflow.fcntl, "flock", Mock(side_effect=[BlockingIOError, None]))
     query = replies(monkeypatch, {"terminals": [live(checkout)]})
     assert orca.handoff(checkout).startswith("Reused")
     assert clock.sleeps == [0.25]
@@ -860,7 +863,7 @@ def test_finish_setup_records_readiness_before_hooks_and_clears_on_success(monke
 
 def test_finish_setup_failure_persists_and_blocks_handoff(monkeypatch, checkout, clock):
     run = Mock(side_effect=[hook_listing(), subprocess.CompletedProcess([], 1, "secret stdout", "secret stderr")])
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     with pytest.raises(orca.HandoffError, match="setup hook failed"):
         orca.finish_setup(orca.Setup(checkout.parent, (), ()), checkout, "feature/test", "main")
     assert json.loads(orca._setup_path(checkout).read_text()) == {
@@ -884,7 +887,7 @@ def test_resume_setup_without_record_is_noop(monkeypatch, checkout):
 def test_resume_setup_retries_saved_branch_and_base_before_launch(monkeypatch, checkout, clock, base):
     setup = orca.Setup(checkout.parent, (), ())
     run = Mock(side_effect=[hook_listing(), subprocess.CompletedProcess([], 1, "", "")])
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     with pytest.raises(orca.HandoffError, match="setup hook failed"):
         orca.finish_setup(setup, checkout, "saved-branch", base)
     calls = []
@@ -897,7 +900,7 @@ def test_resume_setup_retries_saved_branch_and_base_before_launch(monkeypatch, c
         clock.now += 2
         return hook_listing() if "show" in args else subprocess.CompletedProcess(args, 0, "", "")
 
-    monkeypatch.setattr(orca, "_run", ready_run)
+    monkeypatch.setattr(workflow, "_run", ready_run)
     orca.resume_setup(setup, checkout)
     assert len(calls) == 4
     assert ["show" in args for args, _kwargs in calls] == [True, False, True, False]
@@ -915,7 +918,7 @@ def test_resume_setup_retries_saved_branch_and_base_before_launch(monkeypatch, c
 def test_resume_setup_failed_retry_keeps_launch_blocked(monkeypatch, checkout, clock):
     setup = orca.Setup(checkout.parent, (), ())
     run = Mock(side_effect=[hook_listing(), subprocess.CompletedProcess([], 1, "", "")] * 2)
-    monkeypatch.setattr(orca, "_run", run)
+    monkeypatch.setattr(workflow, "_run", run)
     with pytest.raises(orca.HandoffError):
         orca.finish_setup(setup, checkout, "saved-branch", "main")
     before = orca._setup_path(checkout).read_text()
@@ -1025,6 +1028,34 @@ def test_orca_failure_without_error_uses_command_failed(monkeypatch, checkout, r
         _ORCA(["terminal", "list"], cwd=checkout)
     assert caught.value.code == "command_failed"
     assert caught.value.data == {}
+
+
+@pytest.mark.parametrize("name,value", [("HERDR_ENV", "1"), ("HERDR_SOCKET_PATH", "/tmp/herdr.sock")])
+def test_shared_manual_gate_permits_herdr_but_orca_gate_stays_restricted(monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    assert workflow.manual_invocation() is True
+    assert orca.manual_invocation() is False
+
+
+def test_shared_manual_gate_rejects_agent_marked_shell(monkeypatch):
+    monkeypatch.setenv("WORKTRUNK_AGENT", "1")
+    assert workflow.manual_invocation() is False
+
+
+def test_shared_manual_gate_rejects_non_tty(monkeypatch):
+    monkeypatch.setattr(workflow.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    assert workflow.manual_invocation() is False
+
+
+def test_shared_prepare_reads_config_without_orchestrator_or_manual_gate(monkeypatch, checkout):
+    monkeypatch.setenv("WORKTRUNK_AGENT", "1")
+    monkeypatch.setattr(workflow.sys, "stdin", SimpleNamespace(isatty=lambda: False))
+    run = Mock(return_value=subprocess.CompletedProcess([], 0, '{"user": {"config": {}}}', ""))
+    monkeypatch.setattr(workflow, "_run", run)
+    assert workflow.prepare(checkout) == workflow.Setup(checkout, ("post-start=[]",), ())
+    run.assert_called_once_with(["wt", "-C", str(checkout), "config", "show", "--format", "json"], cwd=checkout)
+    orca._orca.assert_not_called()
+    orca._run.assert_not_called()
 
 
 @pytest.mark.parametrize("error", [OSError("missing orca"), subprocess.TimeoutExpired("orca", 10)])

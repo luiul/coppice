@@ -63,33 +63,39 @@ Full reference, prompt behavior, and safety rails:
 [docs/commands.md](docs/commands.md). A full terminal session:
 [docs/demo.md](docs/demo.md).
 
-## Pi in Orca
+## Pi in Orca or Herdr
 
-Use `cop orca` to start work in Orca. It watches the repo, creates or reuses a wt worktree, finishes setup, starts or reuses Pi, and focuses its terminal. Shell integration enters the resulting directory. Orca must be running.
+Use an explicit orchestrator command to start work. Both commands use wt to create or reuse a worktree, finish setup, start or reuse Pi, focus its terminal, and enter the worktree through shell integration. The selected orchestrator must be running.
 
 ```zsh
 cop orca                                 # current repo, prompt for a branch description
+cop herdr                                # same workflow in Herdr
 cop orca ~/projects/personal/my-repo      # a repo path from anywhere
+cop herdr ~/projects/personal/my-repo
 cop orca --branch fix-import              # choose a branch
-cop orca --branch fix-import --yes        # reopen that branch without the reuse confirmation
-cop new --branch experiment               # worktree only, no Orca action
+cop herdr --branch fix-import --yes       # reopen a branch without the reuse confirmation
+cop new --branch experiment               # worktree only, no orchestrator action
 ```
 
-Both commands accept a repo path, including a subdirectory or linked worktree within it. Both support `--branch`, `--base`, and `--yes`. Without `--branch`, they use the existing branch-description prompt. A linked-worktree path does not silently select its branch.
+All three commands accept a repo path, including a subdirectory or linked worktree within it. They support `--branch`, `--base`, and `--yes`. Without `--branch`, they use the existing branch-description prompt. A linked-worktree path does not silently select its branch.
 
-`cop new` uses normal wt hooks and never contacts Orca. `cop orca` finishes configured user setup before launching Pi. Direct wt, agent-marked, piped, and Herdr calls do not trigger this workflow. Repo-file or system background setup needs an explicit readiness barrier; Coppice stops before creation rather than race it.
+`cop new` uses normal wt hooks and never contacts either orchestrator. Direct wt calls also open no Herdr or Orca workspace. The explicit workflows finish configured user setup before launching Pi. Agent-marked and piped calls do not start this workflow. Repo-file or system background setup needs an explicit readiness barrier; Coppice stops before creation rather than race it.
 
-You no longer need to call `owa` first. That helper remains available for watch-only use. `cop orca` uses Orca's CLI to register the main checkout and show external worktrees, not Orca's native worktree creation.
+`cop orca` registers the main checkout and shows external worktrees. You no longer need to call `owa` first. That helper remains available for watch-only use. Orca's native worktree creation is not used.
 
-Discovery waits at most 45 seconds. Setup has a 240-second deadline. If the handoff fails after creation, the checkout remains and shell navigation still works. The error prints a complete retry command with the repo and branch. Saved setup and launch records live in `~/.cache/coppice/orca`.
+`cop herdr` opens the existing wt checkout with Herdr's public worktree command. Inside Herdr it targets the caller's socket. Outside Herdr it targets the running default session. Use `--session NAME` to select another running session. It does not start a server or create native Herdr worktrees. The global wt config has no Herdr launch hook.
+
+Setup has a 240-second deadline. Calls and launch readiness are bounded. Orca discovery waits at most 45 seconds. If a handoff fails after creation, the checkout remains and shell navigation still works; the command returns a failure status and prints a complete retry with the repo and branch.
 
 ```zsh
 cop orca /path/to/repo --branch fix-import --yes
+cop herdr /path/to/repo --branch fix-import --yes
+cop herdr /path/to/repo --branch fix-import --yes --session work
 ```
 
-This retry selects the existing worktree, finishes any pending setup, reuses Pi that Coppice started, and focuses its terminal. It does not create an extra worktree or agent. If Orca reports a Pi terminal whose launch or liveness cannot be verified, Coppice stops rather than risk a duplicate. A title alone is not proof of a running Pi.
+Retries finish pending setup, safely reuse Pi, and focus its terminal. They do not create an extra worktree or agent. If a launch or terminal identity is uncertain, Coppice stops rather than risk a duplicate. A title alone is not proof of a running Pi.
 
-Opening the verified Pi terminal binds Orca's terminal state. Hide sleeping keeps the worktree visible, even when Pi is idle.
+Opening Orca's verified Pi terminal binds its terminal state. Hide sleeping keeps the worktree visible, even when Pi is idle.
 
 
 ## Concepts

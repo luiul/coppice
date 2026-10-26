@@ -6,7 +6,7 @@ import subprocess
 
 import pytest
 
-from coppice import orca, wt
+from coppice import orca, workflow, wt
 
 
 @pytest.mark.skipif(shutil.which("wt") is None, reason="real wt not installed")
@@ -30,7 +30,7 @@ def test_real_wt_scoped_setup_order_and_default_background(monkeypatch, tmp_path
     monkeypatch.setenv("WORKTRUNK_PROJECT_CONFIG_PATH", str(tmp_path / "missing-project.toml"))
     monkeypatch.setattr(orca, "manual_invocation", lambda: True)
     monkeypatch.setattr(orca, "_orca", lambda *_args, **_kw: {"externalWorktreeVisibility": "show"})
-    monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "state")
     setup = orca.prepare(root)
     assert setup
     result = wt.switch(root, "manual", create=True, base="main", config_overrides=setup.suppress)

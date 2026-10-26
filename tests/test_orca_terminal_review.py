@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from coppice import orca
+from coppice import orca, workflow
 
 
 @pytest.mark.parametrize("changes", [
@@ -13,6 +13,7 @@ from coppice import orca
 ])
 def test_uncertain_pi_blocks_new_launch(monkeypatch, tmp_path, changes):
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "state")
     terminal = {
         "worktreePath": str(tmp_path), "agentIdentity": "pi", "connected": True,
         "writable": True, "orphaned": False, "incarnationId": "live-1", "handle": "pi-1", **changes,

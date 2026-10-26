@@ -16,7 +16,7 @@ Wire-up (zsh), see README:
 That defines `coppice` and `cop` shell functions (both names install as real
 binaries, `cop` is just the shorter, more intuitive alias) which shadow the
 real binaries: each points `COPPICE_CD_FILE` at a temp file, runs `command
-<name> "$@"`, and if that file ends up non-empty (`new` and `orca` write it
+<name> "$@"`, and if that file ends up non-empty (`new`, `orca`, and `herdr` write it
 only after a successful switch), `cd`s there before returning.
 """
 
@@ -75,7 +75,7 @@ def write_cd_file(path: Path) -> None:
 
     A no-op when `COPPICE_CD_FILE` isn't set, i.e. whenever `coppice` is
     invoked directly rather than through the shell function from
-    `coppice shell init`. Called after a successful switch by `new` and `orca`.
+    `coppice shell init`. Called after a successful switch by `new`, `orca`, and `herdr`.
     """
     cd_file = os.environ.get(CD_FILE_ENV_VAR)
     if cd_file:

@@ -7,7 +7,7 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize("command", ["new", "orca"])
+@pytest.mark.parametrize("command", ["new", "orca", "herdr"])
 def test_creation_flags_complete(command):
     # Ask Typer directly, without the user's shell startup or a running Orca.
     result = subprocess.run(

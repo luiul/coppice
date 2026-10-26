@@ -15,19 +15,21 @@ from unittest.mock import Mock
 
 import pytest
 
-from coppice import orca
+from coppice import orca, workflow
 
-_RUN = orca._run
+_RUN = workflow._run
 _FOCUS_PI = orca._focus_pi
 
 
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "state")
+    monkeypatch.setattr(workflow, "_run", Mock(side_effect=AssertionError("Unexpected setup subprocess")))
     monkeypatch.setattr(orca, "_orca", Mock(side_effect=AssertionError("Unexpected Orca command")))
     monkeypatch.setattr(orca, "_focus_pi", Mock())
     monkeypatch.setattr(orca, "_run", Mock(side_effect=AssertionError("Unexpected subprocess")))
-    monkeypatch.setattr(orca, "_branch_has_checkout", lambda *_args: False)
+    monkeypatch.setattr(workflow, "_branch_has_checkout", lambda *_args: False)
     monkeypatch.setattr(orca, "manual_invocation", lambda: True)
     monkeypatch.setattr(orca.shutil, "which", lambda _name: "/fake/orca")
 
@@ -69,9 +71,12 @@ def _launch_record(path):
 def _lock_worker(state_root, checkout, action, entered, release, completed, results):
     """Spawned workers use real flock, but can never reach Orca or wt."""
     orca.STATE_ROOT = Path(state_root)
+    workflow.STATE_ROOT = Path(state_root)
     orca.DISCOVERY_TIMEOUT = 8
+    workflow.DISCOVERY_TIMEOUT = 8
     path = Path(checkout)
     orca._run = Mock(side_effect=AssertionError("Unexpected subprocess"))
+    workflow._run = Mock(side_effect=AssertionError("Unexpected setup subprocess"))
 
     def focus(handle, target):
         assert (handle, target) == ("terminal-1", path)
@@ -211,7 +216,7 @@ def test_failed_setup_retry_keeps_intent_until_success(monkeypatch, checkout):
         "main",
         Mock(return_value={"action": "created", "path": str(checkout)}),
     )
-    assert first["orca_setup_error"] == "Hook failed"
+    assert first["setup_error"] == "Hook failed"
     assert orca._setup_path(checkout).exists()
     assert len(list(orca.STATE_ROOT.glob("*.intent.json"))) == 1
     with pytest.raises(orca.HandoffError, match="setup is still pending"):
@@ -223,7 +228,7 @@ def test_failed_setup_retry_keeps_intent_until_success(monkeypatch, checkout):
         "main",
         Mock(return_value={"action": "existing", "path": str(checkout)}),
     )
-    assert "orca_setup_error" not in second
+    assert "setup_error" not in second
     assert finish.call_count == 2
     assert not orca._setup_path(checkout).exists()
     assert not list(orca.STATE_ROOT.glob("*.intent.json"))
@@ -254,7 +259,7 @@ def test_malformed_nested_config_raises_handoff_error(monkeypatch, checkout, sou
     config[source] = {"config": value} if nested else value
     monkeypatch.setattr(orca, "_orca", Mock(return_value={"repo": {"externalWorktreeVisibility": "show"}}))
     monkeypatch.setattr(
-        orca,
+        workflow,
         "_run",
         Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps(config), "")),
     )
@@ -429,6 +434,32 @@ def test_unconfirmed_focus_preserves_binding_and_retries_only_focus(monkeypatch,
     assert [call.args[0][:2] for call in query.call_args_list] == [
         ["terminal", "list"], ["terminal", "switch"], ["terminal", "list"], ["terminal", "switch"],
     ]
+
+
+def test_shared_run_passes_explicit_environment(monkeypatch, tmp_path):
+    monkeypatch.setenv("COPPICE_WORKFLOW_PARENT_ONLY", "must not leak")
+    code = (
+        "import json, os; "
+        "print(json.dumps([os.getenv('COPPICE_WORKFLOW_VALUE'), os.getenv('COPPICE_WORKFLOW_PARENT_ONLY')]))"
+    )
+    result = _RUN(
+        [sys.executable, "-c", code], cwd=tmp_path, timeout=10,
+        env={"COPPICE_WORKFLOW_VALUE": "explicit environment"},
+    )
+    assert result.returncode == 0
+    assert json.loads(result.stdout) == ["explicit environment", None]
+    assert result.stderr == ""
+
+
+def test_shared_run_inherits_environment_when_omitted(monkeypatch, tmp_path):
+    monkeypatch.setenv("COPPICE_WORKFLOW_VALUE", "inherited environment")
+    result = _RUN(
+        [sys.executable, "-c", "import os; print(os.getenv('COPPICE_WORKFLOW_VALUE'))"],
+        cwd=tmp_path, timeout=10,
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip() == "inherited environment"
+    assert result.stderr == ""
 
 
 def test_run_timeout_bounds_drain_of_escaped_owned_pipe_holder(tmp_path):

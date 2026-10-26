@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ from rich.table import Table
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
-from coppice import confirm, gh, git, orca, repo, shell, sizes, vscode, wt
+from coppice import confirm, gh, git, herdr, orca, repo, shell, sizes, vscode, workflow, wt
 from coppice import park as park_mod
 
 APP_HELP = """\
@@ -217,7 +218,7 @@ def cmd_new(
         coppice new ./tardis
         coppice new . --branch fix-thing --base develop
     """
-    _create_worktree(path, branch, base, yes, in_orca=False)
+    _create_worktree(path, branch, base, yes, surface=None)
 
 
 @app.command("orca", rich_help_panel="Create")
@@ -242,11 +243,25 @@ def cmd_orca(
     when shell integration is installed. Existing Pi is reused safely.
     Orca must be running. Use --branch to reopen a particular worktree.
     """
-    _create_worktree(path, branch, base, yes, in_orca=True)
+    _create_worktree(path, branch, base, yes, surface="orca")
 
 
-def _create_worktree(path: str, branch: str | None, base: str | None, yes: bool, *, in_orca: bool) -> None:
-    """Shared worktree workflow. Only the explicit Orca command adds its handoff."""
+@app.command("herdr", rich_help_panel="Create")
+def cmd_herdr(
+    path: Annotated[str, typer.Argument(help="Repo to create/reuse a worktree in and open in Herdr.")] = ".",
+    branch: Annotated[str | None, typer.Option("--branch", "-b", help="Branch name. Prompts if omitted.")] = None,
+    base: Annotated[str | None, typer.Option("--base", "-B", help="Base branch/ref. Defaults to the repo's default branch.")] = None,
+    yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation when the branch exists.")] = False,
+    session: Annotated[str | None, typer.Option("--session", help="Running Herdr session. Defaults to the caller or default session.")] = None,
+) -> None:
+    """Create or reuse a wt worktree, then open Pi in Herdr and enter its directory."""
+    _create_worktree(path, branch, base, yes, surface="herdr", session=session)
+
+
+def _create_worktree(
+    path: str, branch: str | None, base: str | None, yes: bool, *, surface: str | None, session: str | None = None
+) -> None:
+    """Shared worktree workflow. Explicit orchestrator commands add their handoff."""
     try:
         repo_root = repo.resolve_repo_root(path)
     except repo.RepoResolutionError as exc:
@@ -295,17 +310,22 @@ def _create_worktree(path: str, branch: str | None, base: str | None, yes: bool,
         _freshen_explicit_base(repo_root, base)
 
     setup = None
-    if in_orca:
+    herdr_target = None
+    if surface:
         try:
-            setup = orca.prepare_workflow(repo_root)
-        except (orca.HandoffError, OSError) as exc:
+            if surface == "orca":
+                setup = orca.prepare_workflow(repo_root)
+            else:
+                setup, herdr_target = herdr.prepare_workflow(repo_root, session)
+        except (workflow.HandoffError, OSError) as exc:
             raise _fail(str(exc)) from exc
 
     try:
         switch_options = {"config_overrides": setup.suppress} if setup else {}
         if setup:
-            console.print("Creating the checkout and finishing wt setup for Orca...")
-            result = orca.switch_ready(
+            assert surface is not None
+            console.print(f"Creating the checkout and finishing wt setup for {surface.title()}...")
+            result = workflow.switch_ready(
                 setup, branch, base,
                 lambda: _switch_with_recovery(repo_root, branch, create=create, base=base, **switch_options),
             )
@@ -319,7 +339,7 @@ def _create_worktree(path: str, branch: str | None, base: str | None, yes: bool,
         if exc.streamed:
             raise typer.Exit(1) from exc
         raise _fail(str(exc)) from exc
-    except (orca.HandoffError, OSError) as exc:
+    except (workflow.HandoffError, OSError) as exc:
         raise _fail(str(exc)) from exc
 
     repo.register_repo(repo_root)
@@ -349,14 +369,23 @@ def _create_worktree(path: str, branch: str | None, base: str | None, yes: bool,
     if result_path:
         shell.write_cd_file(Path(result_path))
         if setup:
+            assert surface is not None
             try:
-                if result.get("orca_setup_error"):
-                    raise orca.HandoffError(result["orca_setup_error"])
-                console.print("Opening Pi in Orca...")
-                console.print(orca.handoff(Path(result_path)))
-            except (orca.HandoffError, OSError) as exc:
-                console.print(f"Worktree exists, but the Orca handoff failed: {exc}", markup=False)
-                console.print(f"Retry: {orca.retry_command(repo_root, branch)}", markup=False)
+                if result.get("setup_error"):
+                    raise workflow.HandoffError(result["setup_error"])
+                console.print(f"Opening Pi in {surface.title()}...")
+                if surface == "orca":
+                    message = orca.handoff(Path(result_path))
+                else:
+                    assert herdr_target is not None
+                    message = herdr.handoff(herdr_target, repo_root, Path(result_path))
+                console.print(message)
+            except (workflow.HandoffError, OSError) as exc:
+                console.print(f"Worktree exists, but the {surface.title()} handoff failed: {exc}", markup=False)
+                args = ["cop", surface, str(repo_root), "--branch", branch, "--yes"]
+                if surface == "herdr" and session:
+                    args += ["--session", session]
+                console.print(f"Retry: {shlex.join(args)}", markup=False)
                 raise typer.Exit(1) from exc
 
 
