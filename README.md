@@ -63,29 +63,33 @@ Full reference, prompt behavior, and safety rails:
 [docs/commands.md](docs/commands.md). A full terminal session:
 [docs/demo.md](docs/demo.md).
 
-### Pi in Orca
+## Pi in Orca
 
-From an interactive shell, `cop new` starts or reuses Pi in an already watched Orca repo. Register the repo first with `owa` (your shell helper), or set its external worktree visibility to `show` with the [Orca CLI](https://onorca.dev). Orca must be running.
-
-```zsh
-owa ~/projects/personal/my-repo
-cop new ~/projects/personal/my-repo
-```
-
-Coppice uses wt to create the checkout and finish configured user setup before starting Pi. It opens the Pi terminal in Orca and sends no initial prompt. Direct wt calls, agent-marked calls, Herdr calls, and piped stdin do not trigger this handoff. Repo-file or system background setup needs an explicit readiness barrier; Coppice skips automatic launch rather than race it.
-
-Discovery waits at most 45 seconds. Setup has a 240-second deadline. If the handoff fails, the checkout remains and shell navigation still works. Retry with `cop orca /absolute/checkout/path`. The retry uses the pending setup or launch record and never blindly repeats an uncertain launch. Launch records live in `~/.cache/coppice/orca`.
-
-`cop orca` opens Pi for a checkout that already exists. It finishes saved setup work, reuses Pi that Coppice started, or starts Pi when no agent is present. It then selects that terminal in Orca. It does not create a branch or worktree. You can call it from any subdirectory of the checkout:
+Use `cop orca` to start work in Orca. It watches the repo, creates or reuses a wt worktree, finishes setup, starts or reuses Pi, and focuses its terminal. Shell integration enters the resulting directory. Orca must be running.
 
 ```zsh
-cop orca
-cop orca /absolute/checkout/path
+cop orca                                 # current repo, prompt for a branch description
+cop orca ~/projects/personal/my-repo      # a repo path from anywhere
+cop orca --branch fix-import              # choose a branch
+cop orca --branch fix-import --yes        # reopen that branch without the reuse confirmation
+cop new --branch experiment               # worktree only, no Orca action
 ```
 
-If Orca reports a Pi terminal whose launch or liveness cannot be verified, Coppice stops rather than risk a duplicate. Open that terminal in Orca to inspect it. A terminal title alone is not proof of a running Pi.
+Both commands accept a repo path, including a subdirectory or linked worktree within it. Both support `--branch`, `--base`, and `--yes`. Without `--branch`, they use the existing branch-description prompt. A linked-worktree path does not silently select its branch.
 
-Coppice opens the verified Pi terminal after launch or reuse. This binds Orca's terminal state and keeps the worktree visible under Hide sleeping, even when Pi is idle. The launch request itself stays unchanged so uncertain launches can be retried safely.
+`cop new` uses normal wt hooks and never contacts Orca. `cop orca` finishes configured user setup before launching Pi. Direct wt, agent-marked, piped, and Herdr calls do not trigger this workflow. Repo-file or system background setup needs an explicit readiness barrier; Coppice stops before creation rather than race it.
+
+You no longer need to call `owa` first. That helper remains available for watch-only use. `cop orca` uses Orca's CLI to register the main checkout and show external worktrees, not Orca's native worktree creation.
+
+Discovery waits at most 45 seconds. Setup has a 240-second deadline. If the handoff fails after creation, the checkout remains and shell navigation still works. The error prints a complete retry command with the repo and branch. Saved setup and launch records live in `~/.cache/coppice/orca`.
+
+```zsh
+cop orca /path/to/repo --branch fix-import --yes
+```
+
+This retry selects the existing worktree, finishes any pending setup, reuses Pi that Coppice started, and focuses its terminal. It does not create an extra worktree or agent. If Orca reports a Pi terminal whose launch or liveness cannot be verified, Coppice stops rather than risk a duplicate. A title alone is not proof of a running Pi.
+
+Opening the verified Pi terminal binds Orca's terminal state. Hide sleeping keeps the worktree visible, even when Pi is idle.
 
 
 ## Concepts

@@ -217,6 +217,36 @@ def cmd_new(
         coppice new ./tardis
         coppice new . --branch fix-thing --base develop
     """
+    _create_worktree(path, branch, base, yes, in_orca=False)
+
+
+@app.command("orca", rich_help_panel="Create")
+def cmd_orca(
+    path: Annotated[str, typer.Argument(help="Repo to create/reuse a worktree in and open in Orca.")] = ".",
+    branch: Annotated[
+        str | None,
+        typer.Option("--branch", "-b", help="Branch name. Prompts for a short description if omitted."),
+    ] = None,
+    base: Annotated[
+        str | None,
+        typer.Option("--base", "-B", help="Base branch/ref. Defaults to the repo's actual default branch."),
+    ] = None,
+    yes: Annotated[
+        bool,
+        typer.Option("--yes", "-y", help="Skip the confirmation prompt when the branch already exists."),
+    ] = False,
+) -> None:
+    """Watch a repo, create or reuse a worktree, then open Pi in Orca.
+
+    Uses wt for worktree setup and paths. Enters the resulting directory
+    when shell integration is installed. Existing Pi is reused safely.
+    Orca must be running. Use --branch to reopen a particular worktree.
+    """
+    _create_worktree(path, branch, base, yes, in_orca=True)
+
+
+def _create_worktree(path: str, branch: str | None, base: str | None, yes: bool, *, in_orca: bool) -> None:
+    """Shared worktree workflow. Only the explicit Orca command adds its handoff."""
     try:
         repo_root = repo.resolve_repo_root(path)
     except repo.RepoResolutionError as exc:
@@ -265,10 +295,11 @@ def cmd_new(
         _freshen_explicit_base(repo_root, base)
 
     setup = None
-    try:
-        setup = orca.prepare(repo_root)
-    except orca.HandoffError as exc:
-        console.print(str(exc), markup=False)
+    if in_orca:
+        try:
+            setup = orca.prepare_workflow(repo_root)
+        except (orca.HandoffError, OSError) as exc:
+            raise _fail(str(exc)) from exc
 
     try:
         switch_options = {"config_overrides": setup.suppress} if setup else {}
@@ -325,30 +356,8 @@ def cmd_new(
                 console.print(orca.handoff(Path(result_path)))
             except (orca.HandoffError, OSError) as exc:
                 console.print(f"Worktree exists, but the Orca handoff failed: {exc}", markup=False)
-                console.print(f"Retry: {orca.retry_command(Path(result_path))}", markup=False)
-
-
-@app.command("orca", rich_help_panel="Create")
-def cmd_orca(path: Annotated[str, typer.Argument(help="Existing checkout to start or reuse Pi in.")] = ".") -> None:
-    """Retry the Orca handoff and focus Pi, without creating a worktree."""
-    target = Path(path).expanduser().resolve()
-    try:
-        root = repo.resolve_repo_root(target)
-        checkout = subprocess.run(
-            ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
-            capture_output=True, text=True, timeout=orca.CALL_TIMEOUT,
-        )
-        if checkout.returncode:
-            raise orca.HandoffError("Expected an existing checkout, not a bare repo.")
-        target = Path(checkout.stdout.strip()).resolve()
-        setup = orca.prepare(root)
-        if setup is None:
-            raise orca.HandoffError("Use an interactive shell and run owa for this repo first.")
-        with orca.checkout_lock(root):
-            orca.resume_setup(setup, target)
-            console.print(orca.handoff(target))
-    except (orca.HandoffError, repo.RepoResolutionError, OSError, subprocess.TimeoutExpired) as exc:
-        raise _fail(str(exc)) from exc
+                console.print(f"Retry: {orca.retry_command(repo_root, branch)}", markup=False)
+                raise typer.Exit(1) from exc
 
 
 def _freshen_explicit_base(repo_root: Path, base: str) -> None:

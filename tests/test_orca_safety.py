@@ -27,6 +27,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(orca, "_orca", Mock(side_effect=AssertionError("Unexpected Orca command")))
     monkeypatch.setattr(orca, "_focus_pi", Mock())
     monkeypatch.setattr(orca, "_run", Mock(side_effect=AssertionError("Unexpected subprocess")))
+    monkeypatch.setattr(orca, "_branch_has_checkout", lambda *_args: False)
     monkeypatch.setattr(orca, "manual_invocation", lambda: True)
     monkeypatch.setattr(orca.shutil, "which", lambda _name: "/fake/orca")
 

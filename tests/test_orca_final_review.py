@@ -3,7 +3,7 @@
 import json
 import subprocess
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from typer.testing import CliRunner
@@ -40,10 +40,14 @@ def recovery(monkeypatch, tmp_path):
         ready=False,
         fail_next=False,
         pi_live=False,
+        switch=Mock(return_value={"action": "existing", "path": str(root)}),
     )
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "isolated-orca-state")
-    monkeypatch.setattr(orca, "prepare", lambda actual_root: setup if actual_root == root else pytest.fail("Wrong repo root"))
+    monkeypatch.setattr(
+        orca, "prepare_workflow", lambda actual_root: setup if actual_root == root else pytest.fail("Wrong repo root"),
+    )
     monkeypatch.setattr(wt, "require_wt", lambda: "wt")
+    monkeypatch.setattr(wt, "switch", state.switch)
     monkeypatch.setattr(repo, "register_repo", lambda _root: None)
     monkeypatch.setattr(shell, "write_cd_file", state.cd.append)
 
@@ -59,7 +63,10 @@ def recovery(monkeypatch, tmp_path):
         state.ready = True
 
     def run(args, *, cwd, timeout=orca.CALL_TIMEOUT):
-        assert args == ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"]
+        assert args in (
+            ["git", "-C", str(root), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            ["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"],
+        )
         return _RUN(args, cwd=cwd, timeout=timeout)
 
     def command(args, *, cwd, timeout=orca.CALL_TIMEOUT):
@@ -103,25 +110,74 @@ def _interrupt_creation(state):
         assert not orca._setup_path(state.root).exists()
         raise KeyboardInterrupt("Checkout exists, but its creation reply was interrupted")
 
-    with pytest.raises(KeyboardInterrupt):
+    with patch.object(orca, "_branch_has_checkout", return_value=False), pytest.raises(KeyboardInterrupt):
         orca.switch_ready(state.setup, BRANCH, BASE, interrupted_switch)
+    assert orca._branch_has_checkout(state.root, BRANCH)
     assert json.loads(orca._intent_path(state.root, BRANCH).read_text())["base"] == BASE
 
 
-def _reuse_through_new(monkeypatch, state):
-    switch = Mock(return_value={"action": "existing", "path": str(state.root)})
-    monkeypatch.setattr(cli, "_switch_with_recovery", switch)
-    result = runner.invoke(cli.app, ["new", str(state.root), "--branch", BRANCH, "--yes"])
+def _reuse_through_orca(state, target=None):
+    state.switch.reset_mock()
+    previous_cd = list(state.cd)
+    result = runner.invoke(cli.app, ["orca", str(target or state.root), "--branch", BRANCH, "--yes"])
     assert result.exit_code == 0, result.output
-    switch.assert_called_once_with(
+    state.switch.assert_called_once_with(
         state.root, BRANCH, create=False, base=None, config_overrides=state.setup.suppress,
     )
-    assert state.cd == [state.root]
+    assert state.switch.return_value == {"action": "existing", "path": str(state.root)}
+    assert state.cd == [*previous_cd, state.root]
     return result
 
 
+def test_interrupted_existing_reuse_writes_no_intent_or_repeats_setup(monkeypatch, recovery):
+    state = recovery
+    state.ready = True
+    started = _reuse_through_orca(state)
+    assert "Started Pi" in started.output
+    binding = orca._binding_path(state.root).read_text()
+    assert state.attempts == []
+    state.events.clear()
+    state.cd.clear()
+    state.switch.reset_mock()
+    finish = Mock(side_effect=AssertionError("Existing checkout must not repeat setup"))
+    resume = Mock(side_effect=AssertionError("Existing checkout has no pending setup"))
+    monkeypatch.setattr(orca, "finish_setup", finish)
+    monkeypatch.setattr(orca, "resume_setup", resume)
+
+    def interrupted_switch(*_args, **_kwargs):
+        assert orca._branch_has_checkout(state.root, BRANCH)
+        assert not orca._intent_path(state.root, BRANCH).exists()
+        assert not orca._setup_path(state.root).exists()
+        raise KeyboardInterrupt("Existing checkout switch was interrupted")
+
+    state.switch.side_effect = interrupted_switch
+    interrupted = runner.invoke(cli.app, ["orca", str(state.root), "--branch", BRANCH, "--yes"])
+
+    assert interrupted.exit_code == 130, interrupted.output
+    state.switch.assert_called_once_with(
+        state.root, BRANCH, create=False, base=None, config_overrides=state.setup.suppress,
+    )
+    assert state.events == []
+    assert state.cd == []
+    assert not orca._intent_path(state.root, BRANCH).exists()
+    assert not orca._setup_path(state.root).exists()
+    assert orca._binding_path(state.root).read_text() == binding
+
+    state.switch.side_effect = None
+    retried = _reuse_through_orca(state)
+
+    assert "Reused Pi" in retried.output
+    assert state.events == [("terminal", "list"), ("terminal", "switch")]
+    assert state.attempts == []
+    finish.assert_not_called()
+    resume.assert_not_called()
+    assert not orca._intent_path(state.root, BRANCH).exists()
+    assert not orca._setup_path(state.root).exists()
+    assert orca._binding_path(state.root).read_text() == binding
+
+
 @pytest.mark.parametrize("location", ["checkout", "nested", "symlink"])
-def test_interrupted_creation_cli_retry_finishes_setup_before_pi(monkeypatch, recovery, tmp_path, location):
+def test_interrupted_creation_cli_retry_finishes_setup_before_pi(recovery, tmp_path, location):
     state = recovery
     _interrupt_creation(state)
     target = state.root
@@ -131,11 +187,8 @@ def test_interrupted_creation_cli_retry_finishes_setup_before_pi(monkeypatch, re
     elif location == "symlink":
         target = tmp_path / "checkout alias"
         target.symlink_to(state.root, target_is_directory=True)
-    monkeypatch.setattr(wt, "switch", Mock(side_effect=AssertionError("Retry must not create a checkout")))
 
-    result = runner.invoke(cli.app, ["orca", str(target)])
-
-    assert result.exit_code == 0, result.output
+    result = _reuse_through_orca(state, target)
     assert "Started Pi" in result.output
     assert state.attempts == [(state.root, BRANCH, BASE)]
     assert state.events == [
@@ -144,28 +197,28 @@ def test_interrupted_creation_cli_retry_finishes_setup_before_pi(monkeypatch, re
     ]
     assert not orca._setup_path(state.root).exists()
     assert not orca._intent_path(state.root, BRANCH).exists()
-    wt.switch.assert_not_called()
 
 
-def test_failed_setup_cli_retry_clears_intent_and_later_reuse_skips_hooks(monkeypatch, recovery):
+def test_failed_setup_cli_retry_clears_intent_and_later_reuse_skips_hooks(recovery):
     state = recovery
     state.fail_next = True
-    failed = orca.switch_ready(
-        state.setup, BRANCH, BASE,
-        Mock(return_value={"action": "created", "path": str(state.root), "base_branch": BASE}),
-    )
+    with patch.object(orca, "_branch_has_checkout", return_value=False):
+        failed = orca.switch_ready(
+            state.setup, BRANCH, BASE,
+            Mock(return_value={"action": "created", "path": str(state.root), "base_branch": BASE}),
+        )
     assert failed["orca_setup_error"] == "Setup failed once"
     assert orca._setup_path(state.root).exists()
     assert orca._intent_path(state.root, BRANCH).exists()
     assert state.events == ["setup"]
 
-    retried = runner.invoke(cli.app, ["orca", str(state.root)])
+    retried = _reuse_through_orca(state)
 
-    assert retried.exit_code == 0, retried.output
+    assert "Started Pi" in retried.output
     assert state.attempts == [(state.root, BRANCH, BASE)] * 2
     assert not orca._setup_path(state.root).exists()
     assert not orca._intent_path(state.root, BRANCH).exists()
-    reused = _reuse_through_new(monkeypatch, state)
+    reused = _reuse_through_orca(state)
     assert "Reused Pi" in reused.output
     assert state.attempts == [(state.root, BRANCH, BASE)] * 2
     assert state.events.count(("agent", "launch")) == 1
@@ -174,21 +227,22 @@ def test_failed_setup_cli_retry_clears_intent_and_later_reuse_skips_hooks(monkey
 
 
 @pytest.mark.parametrize("pending_setup_record", [False, True])
-def test_new_retry_keeps_saved_base_when_reusing_existing_branch(monkeypatch, recovery, pending_setup_record):
+def test_orca_retry_keeps_saved_base_when_reusing_existing_branch(recovery, pending_setup_record):
     state = recovery
     if pending_setup_record:
         state.fail_next = True
-        failed = orca.switch_ready(
-            state.setup, BRANCH, BASE,
-            Mock(return_value={"action": "created", "path": str(state.root), "base_branch": BASE}),
-        )
+        with patch.object(orca, "_branch_has_checkout", return_value=False):
+            failed = orca.switch_ready(
+                state.setup, BRANCH, BASE,
+                Mock(return_value={"action": "created", "path": str(state.root), "base_branch": BASE}),
+            )
         assert failed["orca_setup_error"] == "Setup failed once"
     else:
         _interrupt_creation(state)
     assert orca._setup_path(state.root).exists() is pending_setup_record
     expected_attempts = 2 if pending_setup_record else 1
 
-    result = _reuse_through_new(monkeypatch, state)
+    result = _reuse_through_orca(state)
 
     assert "Started Pi" in result.output
     assert state.attempts == [(state.root, BRANCH, BASE)] * expected_attempts

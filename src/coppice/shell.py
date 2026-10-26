@@ -1,4 +1,4 @@
-"""Shell integration: lets `coppice new` actually `cd` you into the new worktree.
+"""Shell integration: lets creation commands `cd` you into their worktree.
 
 `coppice` is a plain executable, not a shell function, so it cannot change its
 parent shell's working directory on its own (a subprocess's `chdir` never
@@ -16,8 +16,8 @@ Wire-up (zsh), see README:
 That defines `coppice` and `cop` shell functions (both names install as real
 binaries, `cop` is just the shorter, more intuitive alias) which shadow the
 real binaries: each points `COPPICE_CD_FILE` at a temp file, runs `command
-<name> "$@"`, and if that file ends up non-empty (only `new` ever writes to
-it, and only on success), `cd`s there before returning.
+<name> "$@"`, and if that file ends up non-empty (`new` and `orca` write it
+only after a successful switch), `cd`s there before returning.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def write_cd_file(path: Path) -> None:
 
     A no-op when `COPPICE_CD_FILE` isn't set, i.e. whenever `coppice` is
     invoked directly rather than through the shell function from
-    `coppice shell init`. Called only after a successful `coppice new`.
+    `coppice shell init`. Called after a successful switch by `new` and `orca`.
     """
     cd_file = os.environ.get(CD_FILE_ENV_VAR)
     if cd_file:

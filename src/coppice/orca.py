@@ -145,6 +145,30 @@ class Setup:
                 raise HandoffError("A wt setup hook failed; Pi was not started. Check wt's hook configuration.")
 
 
+def watch(root: Path) -> None:
+    """Register only when missing, then show wt-created external checkouts."""
+    if not shutil.which("orca"):
+        raise HandoffError("Orca is not installed.")
+    try:
+        _orca(["repo", "show", "--repo", f"path:{root}"], cwd=root)
+    except OrcaError as exc:
+        if exc.code != "repo_not_found":
+            raise
+        _orca(["repo", "add", "--path", str(root)], cwd=root)
+    _orca(["repo", "set", "--repo", f"path:{root}", "--external-worktree-visibility", "show"], cwd=root)
+
+
+def prepare_workflow(root: Path) -> Setup:
+    """Explicit command: preflight before creating any checkout."""
+    if not manual_invocation():
+        raise HandoffError("cop orca needs an interactive shell outside agent-marked or Herdr calls. Use cop new for worktree-only creation.")
+    watch(root)
+    setup = prepare(root)
+    if setup is None:
+        raise HandoffError("Could not prepare the Orca workflow. No worktree was created.")
+    return setup
+
+
 def prepare(root: Path) -> Setup | None:
     """Opt in only to manually requested, already watched repositories."""
     if not manual_invocation() or not shutil.which("orca"):
@@ -235,12 +259,22 @@ def _serialized(function: _T) -> _T:
     return cast(_T, wrapper)
 
 
+def _branch_has_checkout(root: Path, branch: str) -> bool:
+    try:
+        result = _run(["git", "-C", str(root), "worktree", "list", "--porcelain", "-z"], cwd=root)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise HandoffError("Could not inspect existing worktrees. No Orca worktree was created.") from exc
+    if result.returncode:
+        raise HandoffError("Could not inspect existing worktrees. No Orca worktree was created.")
+    return f"branch refs/heads/{branch}" in result.stdout.split("\0")
+
+
 def switch_ready(setup: Setup, branch: str, base: str | None, switch: Callable[[], dict[str, Any]]) -> dict[str, Any]:
     """Cover creation-to-readiness with a repo lock and a durable branch intent."""
     with checkout_lock(setup.root):
         intent = _intent_path(setup.root, branch)
         prior = _read_intent(intent, setup.root, branch) if intent.exists() else None
-        if prior is None:
+        if prior is None and not _branch_has_checkout(setup.root, branch):
             _save(intent, {"root": str(setup.root), "branch": branch, "base": base})
         result = switch()
         if result.get("path"):
@@ -321,8 +355,8 @@ def resume_setup(setup: Setup, path: Path) -> None:
             finish_setup(setup, path, branch, state.get("base"))
 
 
-def retry_command(path: Path) -> str:
-    return shlex.join(["cop", "orca", str(path)])
+def retry_command(root: Path, branch: str) -> str:
+    return shlex.join(["cop", "orca", str(root), "--branch", branch, "--yes"])
 
 
 def _live_pi(payload: dict[str, Any], path: Path) -> str | None:
