@@ -76,6 +76,15 @@ Coppice uses wt to create the checkout and finish configured user setup before s
 
 Discovery waits at most 45 seconds. Setup has a 240-second deadline. If the handoff fails, the checkout remains and shell navigation still works. Retry with `cop orca /absolute/checkout/path`. The retry uses the pending setup or launch record and never blindly repeats an uncertain launch. Launch records live in `~/.cache/coppice/orca`.
 
+`cop orca` opens Pi for a checkout that already exists. It finishes saved setup work, reuses Pi that Coppice started, or starts Pi when no agent is present. It then selects that terminal in Orca. It does not create a branch or worktree. You can call it from any subdirectory of the checkout:
+
+```zsh
+cop orca
+cop orca /absolute/checkout/path
+```
+
+If Orca reports a Pi terminal whose launch or liveness cannot be verified, Coppice stops rather than risk a duplicate. Open that terminal in Orca to inspect it. A terminal title alone is not proof of a running Pi.
+
 Coppice opens the verified Pi terminal after launch or reuse. This binds Orca's terminal state and keeps the worktree visible under Hide sleeping, even when Pi is idle. The launch request itself stays unchanged so uncertain launches can be retried safely.
 
 

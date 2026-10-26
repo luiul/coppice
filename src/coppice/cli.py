@@ -334,13 +334,20 @@ def cmd_orca(path: Annotated[str, typer.Argument(help="Existing checkout to star
     target = Path(path).expanduser().resolve()
     try:
         root = repo.resolve_repo_root(target)
+        checkout = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, timeout=orca.CALL_TIMEOUT,
+        )
+        if checkout.returncode:
+            raise orca.HandoffError("Expected an existing checkout, not a bare repo.")
+        target = Path(checkout.stdout.strip()).resolve()
         setup = orca.prepare(root)
         if setup is None:
             raise orca.HandoffError("Use an interactive shell and run owa for this repo first.")
         with orca.checkout_lock(root):
             orca.resume_setup(setup, target)
             console.print(orca.handoff(target))
-    except (orca.HandoffError, repo.RepoResolutionError, OSError) as exc:
+    except (orca.HandoffError, repo.RepoResolutionError, OSError, subprocess.TimeoutExpired) as exc:
         raise _fail(str(exc)) from exc
 
 

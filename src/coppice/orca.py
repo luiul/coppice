@@ -228,7 +228,7 @@ def _serialized(function: _T) -> _T:
         path = args[1] if name in {"finish_setup", "resume_setup"} else args[0]
         if name == "handoff":
             path.resolve(strict=True)
-        if name == "resume_setup" and not _setup_path(path).exists():
+        if name == "resume_setup" and not _setup_path(path).exists() and not any(STATE_ROOT.glob("*.intent.json")):
             return function(*args, **kwargs)
         with checkout_lock(path):
             return function(*args, **kwargs)
@@ -238,22 +238,44 @@ def _serialized(function: _T) -> _T:
 def switch_ready(setup: Setup, branch: str, base: str | None, switch: Callable[[], dict[str, Any]]) -> dict[str, Any]:
     """Cover creation-to-readiness with a repo lock and a durable branch intent."""
     with checkout_lock(setup.root):
-        digest = hashlib.sha256(os.fsencode(setup.root.resolve()) + b"\0" + branch.encode()).hexdigest()
-        intent = STATE_ROOT / f"{digest}.intent.json"
-        prior = intent.exists()
-        _save(intent, {"root": str(setup.root), "branch": branch, "base": base})
+        intent = _intent_path(setup.root, branch)
+        prior = _read_intent(intent, setup.root, branch) if intent.exists() else None
+        if prior is None:
+            _save(intent, {"root": str(setup.root), "branch": branch, "base": base})
         result = switch()
         if result.get("path"):
             target = Path(result["path"])
             try:
-                if result.get("action") == "created" or prior:
+                if result.get("action") == "created":
                     finish_setup(setup, target, branch, result.get("base_branch", base))
-                else:
+                elif _setup_path(target).exists():
                     resume_setup(setup, target)
+                elif prior is not None:
+                    finish_setup(setup, target, branch, prior.get("base"))
                 intent.unlink(missing_ok=True)
             except (HandoffError, OSError) as exc:
                 result["orca_setup_error"] = str(exc)
         return result
+
+
+def _intent_path(root: Path, branch: str) -> Path:
+    digest = hashlib.sha256(os.fsencode(root.resolve()) + b"\0" + branch.encode()).hexdigest()
+    return STATE_ROOT / f"{digest}.intent.json"
+
+
+def _read_intent(record: Path, root: Path, branch: str) -> dict[str, Any]:
+    try:
+        state = json.loads(record.read_text())
+        if (
+            not isinstance(state, dict)
+            or state.get("root") != str(root)
+            or state.get("branch") != branch
+            or (state.get("base") is not None and not isinstance(state["base"], str))
+        ):
+            raise ValueError("invalid creation record")
+        return state
+    except (ValueError, TypeError, OSError) as exc:
+        raise HandoffError("Cannot read the interrupted creation record; Pi was not started.") from exc
 
 
 def _setup_path(path: Path) -> Path:
@@ -269,6 +291,7 @@ def finish_setup(setup: Setup, path: Path, branch: str, base: str | None) -> Non
     _save(record, {"path": str(path.resolve()), "branch": branch, "base": base})
     setup.finish(path, branch, base)
     record.unlink(missing_ok=True)
+    _intent_path(setup.root, branch).unlink(missing_ok=True)
 
 
 @_serialized
@@ -282,6 +305,20 @@ def resume_setup(setup: Setup, path: Path) -> None:
         except (ValueError, KeyError, TypeError) as exc:
             raise HandoffError("Cannot read the pending setup record; Pi was not started.") from exc
         finish_setup(setup, path, state["branch"], state.get("base"))
+    elif any(STATE_ROOT.glob("*.intent.json")):
+        # A crash after wt creates the directory can precede the readiness record.
+        # Match its saved branch through Git, never through the directory name.
+        try:
+            result = _run(["git", "-C", str(path), "symbolic-ref", "--quiet", "--short", "HEAD"], cwd=path)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HandoffError("Cannot resolve pending worktree setup; Pi was not started.") from exc
+        if result.returncode:
+            raise HandoffError("Cannot resolve pending setup on a detached checkout; Pi was not started.")
+        branch = result.stdout.strip()
+        intent = _intent_path(setup.root, branch)
+        if intent.exists():
+            state = _read_intent(intent, setup.root, branch)
+            finish_setup(setup, path, branch, state.get("base"))
 
 
 def retry_command(path: Path) -> str:
@@ -291,9 +328,9 @@ def retry_command(path: Path) -> str:
 def _live_pi(payload: dict[str, Any], path: Path) -> str | None:
     if payload.get("truncated") or not isinstance(payload.get("terminals"), list):
         raise HandoffError("Orca's terminal list is incomplete; refusing a possible duplicate launch.")
-    for terminal in payload.get("terminals", []):
-        if not isinstance(terminal, dict):
-            raise HandoffError("Orca's terminal list is unreadable; refusing a possible duplicate launch.")
+    if any(not isinstance(terminal, dict) for terminal in payload["terminals"]):
+        raise HandoffError("Orca's terminal list is unreadable; refusing a possible duplicate launch.")
+    for terminal in payload["terminals"]:
         if (
             terminal.get("worktreePath") == str(path)
             and terminal.get("agentIdentity") == "pi"
@@ -307,9 +344,63 @@ def _live_pi(payload: dict[str, Any], path: Path) -> str | None:
     return None
 
 
+def _binding_path(path: Path) -> Path:
+    digest = hashlib.sha256(os.fsencode(path)).hexdigest()
+    return STATE_ROOT / f"{digest}.binding.json"
+
+
+def _remember_pi(path: Path, terminal: dict[str, Any]) -> None:
+    _save(_binding_path(path), {
+        "path": str(path), "handle": terminal["handle"],
+        "incarnationId": terminal["incarnationId"], "ptyId": terminal.get("ptyId"),
+    })
+
+
+def _verified_pi(payload: dict[str, Any], path: Path, accepted_handle: str | None = None) -> str | None:
+    """Only a recorded launch binding proves Pi identity; titles do not."""
+    handle = _live_pi(payload, path)
+    if not handle:
+        return None
+    record = _binding_path(path)
+    if not record.exists():
+        if accepted_handle:
+            matching = [t for t in payload["terminals"] if t.get("handle") == accepted_handle]
+            handle = _live_pi({"terminals": matching}, path)
+            if handle:
+                _remember_pi(path, matching[0])
+                return handle
+        raise HandoffError("An unrecorded Pi terminal already exists. Open it in Orca; refusing a possible duplicate launch.")
+    try:
+        binding = json.loads(record.read_text())
+        if not isinstance(binding, dict) or binding.get("path") != str(path):
+            raise ValueError("invalid binding")
+    except (ValueError, OSError) as exc:
+        raise HandoffError("Cannot verify the saved Pi terminal. Inspect it in Orca before retrying.") from exc
+    for terminal in payload["terminals"]:
+        if (
+            terminal.get("handle") == binding.get("handle")
+            and terminal.get("incarnationId") == binding.get("incarnationId")
+            and terminal.get("ptyId") == binding.get("ptyId")
+            and _live_pi({"terminals": [terminal]}, path)
+        ):
+            return str(terminal["handle"])
+    raise HandoffError("The saved Pi terminal has changed. Inspect it in Orca before starting another agent.")
+
+
 def _focus_pi(handle: str, path: Path) -> None:
     """Open the verified Pi terminal so Orca binds it and keeps its row awake."""
-    _orca(["terminal", "switch", "--terminal", handle], cwd=path)
+    result = _orca(["terminal", "switch", "--terminal", handle], cwd=path)
+    focus = result.get("focus")
+    if (
+        not isinstance(focus, dict)
+        or focus.get("handle") != handle
+        or focus.get("navigated") is not True
+        or not isinstance(focus.get("tabId"), str)
+        or not focus["tabId"]
+        or not isinstance(focus.get("worktreeId"), str)
+        or focus["worktreeId"].split("::", 1)[-1] != str(path)
+    ):
+        raise HandoffError("Orca did not confirm opening Pi's terminal. Retry without starting another agent.")
 
 
 def _operation_id(value: Any) -> str | None:
@@ -360,11 +451,16 @@ def handoff(path: Path) -> str:
                 if exc.code != "selector_not_found":
                     raise
                 time.sleep(min(0.5, max(0, deadline - time.monotonic())))
-        handle = _live_pi(terminals, path)
+        handle = _verified_pi(terminals, path, state.get("handle"))
         if handle:
             _focus_pi(handle, path)
             state_path.unlink(missing_ok=True)
             return "Reused Pi and opened its worktree in Orca."
+        if any(
+            terminal.get("worktreePath") == str(path) and terminal.get("agentIdentity") == "pi"
+            for terminal in terminals["terminals"]
+        ):
+            raise HandoffError("Orca lists a Pi terminal with uncertain liveness. Inspect it before starting another Pi.")
         args = ["agent", "launch", "--agent", "pi", "--worktree", f"path:{path}", "--surface", "terminal"]
         if state:
             operation_id = state.get("operationId")
@@ -392,13 +488,19 @@ def handoff(path: Path) -> str:
         outcome = result.get("outcome") or launch.get("outcome") or {}
         if not isinstance(outcome, dict) or outcome.get("kind") != "terminal" or not outcome.get("handle"):
             raise HandoffError("Orca did not confirm a Pi terminal launch. The pending launch record was preserved.")
+        _save(state_path, {"path": str(path), "operationId": operation_id, "handle": outcome["handle"], "pending": True})
         # Confirm real PTY liveness, not just receipt of a launch request.
         deadline = time.monotonic() + CALL_TIMEOUT
         while time.monotonic() < deadline:
             terminals = _orca(["terminal", "list", "--worktree", f"path:{path}"], cwd=path,
                               timeout=min(CALL_TIMEOUT, max(0.1, deadline - time.monotonic())))
-            handle = _live_pi(terminals, path)
+            _live_pi(terminals, path)  # Validate the complete list before selecting the launch handle.
+            # Only the accepted launch handle proves which terminal we started.
+            matching = {"terminals": [t for t in terminals.get("terminals", []) if isinstance(t, dict) and t.get("handle") == outcome["handle"]], "truncated": terminals.get("truncated", False)}
+            handle = _live_pi(matching, path)
             if handle:
+                terminal = next(t for t in matching["terminals"] if t["handle"] == handle)
+                _remember_pi(path, terminal)
                 _focus_pi(handle, path)
                 state_path.unlink(missing_ok=True)
                 return "Started Pi and opened its worktree in Orca."

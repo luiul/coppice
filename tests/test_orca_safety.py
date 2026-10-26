@@ -18,6 +18,7 @@ import pytest
 from coppice import orca
 
 _RUN = orca._run
+_FOCUS_PI = orca._focus_pi
 
 
 @pytest.fixture(autouse=True)
@@ -47,10 +48,21 @@ def _live_terminal(path):
                 "writable": True,
                 "orphaned": False,
                 "incarnationId": "incarnation-1",
+                "ptyId": "pty-1",
                 "handle": "terminal-1",
             }
         ],
     }
+
+
+def _seed_binding(path):
+    orca.STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    orca._remember_pi(path, _live_terminal(path)["terminals"][0])
+
+
+def _launch_record(path):
+    digest = hashlib.sha256(os.fsencode(path)).hexdigest()
+    return orca.STATE_ROOT / f"{digest}.json"
 
 
 def _lock_worker(state_root, checkout, action, entered, release, completed, results):
@@ -105,6 +117,7 @@ def _lock_worker(state_root, checkout, action, entered, release, completed, resu
 
 @pytest.mark.parametrize("action", ["handoff", "resume_setup", "finish_setup"])
 def test_setup_serializes_same_checkout_across_real_processes(checkout, action):
+    _seed_binding(checkout)
     ctx = multiprocessing.get_context("spawn")
     release = ctx.Event()
     first_entered, second_entered = ctx.Event(), ctx.Event()
@@ -180,6 +193,7 @@ def test_interrupted_creation_intent_finishes_setup_on_reused_path(monkeypatch, 
     finish_mock.assert_called_once_with(setup, checkout, "feature/test", "main")
     assert not list(orca.STATE_ROOT.glob("*.intent.json"))
     assert not orca._setup_path(checkout).exists()
+    _seed_binding(checkout)
     query = Mock(return_value=_live_terminal(checkout))
     monkeypatch.setattr(orca, "_orca", query)
     assert orca.handoff(checkout).startswith("Reused")
@@ -223,6 +237,7 @@ def test_existing_tracked_path_without_intent_skips_setup_and_reuses_pi(monkeypa
     finish.assert_not_called()
     assert not orca._setup_path(checkout).exists()
     assert not list(orca.STATE_ROOT.glob("*.intent.json"))
+    _seed_binding(checkout)
     query = Mock(return_value=_live_terminal(checkout))
     monkeypatch.setattr(orca, "_orca", query)
     assert orca.handoff(checkout).startswith("Reused")
@@ -273,6 +288,7 @@ def test_reused_pi_focus_failure_preserves_state_and_never_launches(monkeypatch,
     if operation_id:
         state["operationId"] = operation_id
     record.write_text(json.dumps(state))
+    _seed_binding(checkout)
     before = record.read_text()
     query = Mock(return_value=_live_terminal(checkout))
     monkeypatch.setattr(orca, "_orca", query)
@@ -294,7 +310,7 @@ def test_reused_pi_focus_failure_preserves_state_and_never_launches(monkeypatch,
 
 @pytest.mark.parametrize("operation_id", [None, "operation-1"])
 def test_new_pi_focus_failure_preserves_state_and_reuses_on_retry(monkeypatch, checkout, operation_id):
-    result = {"outcome": {"kind": "terminal", "handle": "launch-reply-handle"}}
+    result = {"outcome": {"kind": "terminal", "handle": "terminal-1"}}
     if operation_id:
         result["operationId"] = operation_id
     query = Mock(side_effect=[{"terminals": []}, result, _live_terminal(checkout), _live_terminal(checkout)])
@@ -305,17 +321,18 @@ def test_new_pi_focus_failure_preserves_state_and_reuses_on_retry(monkeypatch, c
     with pytest.raises(orca.OrcaError) as caught:
         orca.handoff(checkout)
     assert caught.value is error
-    records = list(orca.STATE_ROOT.glob("*.json"))
-    assert len(records) == 1
-    expected = {"path": str(checkout), "pending": True}
-    if operation_id:
-        expected["operationId"] = operation_id
-    assert json.loads(records[0].read_text()) == expected
+    record = _launch_record(checkout)
+    expected = {"path": str(checkout), "pending": True, "operationId": operation_id, "handle": "terminal-1"}
+    assert json.loads(record.read_text()) == expected
+    assert json.loads(orca._binding_path(checkout).read_text()) == {
+        "path": str(checkout), "handle": "terminal-1", "incarnationId": "incarnation-1", "ptyId": "pty-1",
+    }
     assert query.call_count == 3
     orca._focus_pi.assert_called_once_with("terminal-1", checkout)
 
     assert orca.handoff(checkout) == "Reused Pi and opened its worktree in Orca."
-    assert not records[0].exists()
+    assert not record.exists()
+    assert orca._binding_path(checkout).exists()
     assert query.call_count == 4
     assert [call.args[0][:2] for call in query.call_args_list] == [
         ["terminal", "list"], ["agent", "launch"], ["terminal", "list"], ["terminal", "list"],
@@ -326,7 +343,7 @@ def test_new_pi_focus_failure_preserves_state_and_reuses_on_retry(monkeypatch, c
 @pytest.mark.parametrize("operation_id", [None, "operation-1"])
 def test_focus_failure_without_live_pi_blocks_fresh_launch_retry(monkeypatch, checkout, operation_id):
     launch = ["agent", "launch", "--agent", "pi", "--worktree", f"path:{checkout}", "--surface", "terminal"]
-    result = {"outcome": {"kind": "terminal", "handle": "launch-reply-handle"}}
+    result = {"outcome": {"kind": "terminal", "handle": "terminal-1"}}
     if operation_id:
         result["operationId"] = operation_id
     values = [{"terminals": []}, result, _live_terminal(checkout), {"terminals": []}]
@@ -339,17 +356,15 @@ def test_focus_failure_without_live_pi_blocks_fresh_launch_retry(monkeypatch, ch
 
     with pytest.raises(orca.OrcaError, match="Focus failed"):
         orca.handoff(checkout)
-    records = list(orca.STATE_ROOT.glob("*.json"))
-    assert len(records) == 1
-    before = json.loads(records[0].read_text())
-    expected = {"path": str(checkout), "pending": True}
-    if operation_id:
-        expected["operationId"] = operation_id
+    record = _launch_record(checkout)
+    before = json.loads(record.read_text())
+    expected = {"path": str(checkout), "pending": True, "operationId": operation_id, "handle": "terminal-1"}
     assert before == expected
+    assert orca._binding_path(checkout).exists()
 
     with pytest.raises(orca.HandoffError, match="Retry uncertain" if operation_id else "earlier launch result is unknown"):
         orca.handoff(checkout)
-    assert json.loads(records[0].read_text()) == before
+    assert json.loads(record.read_text()) == before
     assert query.call_args_list[1].args == (launch,)
     if operation_id:
         assert query.call_count == 5
@@ -357,6 +372,62 @@ def test_focus_failure_without_live_pi_blocks_fresh_launch_retry(monkeypatch, ch
     else:
         assert query.call_count == 4
     orca._focus_pi.assert_called_once_with("terminal-1", checkout)
+
+
+@pytest.mark.parametrize("operation_id", [None, "operation-1"])
+def test_interrupted_postlaunch_verification_recovers_only_accepted_handle(monkeypatch, checkout, operation_id):
+    result = {"outcome": {"kind": "terminal", "handle": "terminal-1"}}
+    if operation_id:
+        result["operationId"] = operation_id
+    query = Mock(side_effect=[
+        {"terminals": []}, result, orca.OrcaError("transport_unknown", "Verification interrupted"),
+        _live_terminal(checkout),
+    ])
+    monkeypatch.setattr(orca, "_orca", query)
+    with pytest.raises(orca.OrcaError, match="Verification interrupted"):
+        orca.handoff(checkout)
+    assert not orca._binding_path(checkout).exists()
+    assert json.loads(_launch_record(checkout).read_text()) == {
+        "path": str(checkout), "operationId": operation_id, "handle": "terminal-1", "pending": True,
+    }
+    assert orca.handoff(checkout).startswith("Reused")
+    orca._focus_pi.assert_called_once_with("terminal-1", checkout)
+    assert orca._binding_path(checkout).exists()
+    assert not _launch_record(checkout).exists()
+    assert [call.args[0][:2] for call in query.call_args_list] == [
+        ["terminal", "list"], ["agent", "launch"], ["terminal", "list"], ["terminal", "list"],
+    ]
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_unconfirmed_focus_preserves_binding_and_retries_only_focus(monkeypatch, checkout, pending):
+    _seed_binding(checkout)
+    binding_before = orca._binding_path(checkout).read_text()
+    record = _launch_record(checkout)
+    if pending:
+        record.write_text(json.dumps({"path": str(checkout), "handle": "terminal-1", "pending": True}))
+    record_before = record.read_text() if pending else None
+    success = {"focus": {
+        "handle": "terminal-1", "navigated": True, "tabId": "tab-1", "worktreeId": f"repo-1::{checkout}",
+    }}
+    query = Mock(side_effect=[
+        _live_terminal(checkout), {"focus": {**success["focus"], "navigated": False}},
+        _live_terminal(checkout), success,
+    ])
+    monkeypatch.setattr(orca, "_orca", query)
+    monkeypatch.setattr(orca, "_focus_pi", _FOCUS_PI)
+    with pytest.raises(orca.HandoffError, match="did not confirm opening"):
+        orca.handoff(checkout)
+    assert orca._binding_path(checkout).read_text() == binding_before
+    assert record.exists() is pending
+    if pending:
+        assert record.read_text() == record_before
+    assert orca.handoff(checkout).startswith("Reused")
+    assert not record.exists()
+    assert orca._binding_path(checkout).read_text() == binding_before
+    assert [call.args[0][:2] for call in query.call_args_list] == [
+        ["terminal", "list"], ["terminal", "switch"], ["terminal", "list"], ["terminal", "switch"],
+    ]
 
 
 def test_run_timeout_bounds_drain_of_escaped_owned_pipe_holder(tmp_path):

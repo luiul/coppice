@@ -78,6 +78,7 @@ def live(path, **changes):
         "writable": True,
         "orphaned": False,
         "incarnationId": "incarnation-1",
+        "ptyId": "pty-1",
         "handle": "terminal-1",
         **changes,
     }
@@ -91,8 +92,24 @@ def launch_args(path):
     return ["agent", "launch", "--agent", "pi", "--worktree", f"path:{path}", "--surface", "terminal"]
 
 
-def launch_result():
-    return {"operationId": "operation-1", "outcome": {"kind": "terminal", "handle": "terminal-1"}}
+def launch_result(handle="terminal-1"):
+    return {"operationId": "operation-1", "outcome": {"kind": "terminal", "handle": handle}}
+
+
+def write_binding(path, terminal=None, **changes):
+    terminal = live(path) if terminal is None else terminal
+    orca.STATE_ROOT.mkdir(parents=True, exist_ok=True)
+    binding = {
+        "path": str(path), "handle": terminal["handle"],
+        "incarnationId": terminal["incarnationId"], "ptyId": terminal["ptyId"],
+        **changes,
+    }
+    orca._binding_path(path).write_text(json.dumps(binding))
+    return binding
+
+
+def focus_result(path, terminal_handle="terminal-1", **changes):
+    return {"focus": {"handle": terminal_handle, "navigated": True, "tabId": "tab-1", "worktreeId": f"repo-1::{path}", **changes}}
 
 
 def replies(monkeypatch, *values):
@@ -406,6 +423,7 @@ def test_handoff_reuses_live_identity_without_title(monkeypatch, checkout, clock
     alias = checkout.parent / "alias"
     alias.symlink_to(checkout, target_is_directory=True)
     write_state(checkout, {"path": str(checkout), "pending": True})
+    write_binding(checkout, terminal)
     query = replies(monkeypatch, {"terminals": [terminal]})
 
     def focus(handle, path):
@@ -420,6 +438,7 @@ def test_handoff_reuses_live_identity_without_title(monkeypatch, checkout, clock
 
 
 def test_handoff_discovery_retries_only_selector_not_found(monkeypatch, checkout, clock):
+    write_binding(checkout)
     query = replies(
         monkeypatch,
         orca.OrcaError("selector_not_found", "Not discovered yet"),
@@ -471,12 +490,14 @@ def test_handoff_launch_exact_resolved_path_terminal_surface_without_focus_or_pr
         replies_seen.append((args, kwargs))
         if args[:2] == ["agent", "launch"]:
             assert read_state(checkout) == {"path": str(checkout), "pending": True}
-            return launch_result()
+            return launch_result("verified-new-terminal")
         return {"terminals": [] if len(replies_seen) == 1 else [live(checkout, handle="verified-new-terminal")]}
 
     def focus(handle, path):
         assert len(replies_seen) == 3
-        assert read_state(checkout) == {"path": str(checkout), "operationId": "operation-1", "pending": True}
+        assert read_state(checkout) == {
+            "path": str(checkout), "operationId": "operation-1", "handle": "verified-new-terminal", "pending": True,
+        }
 
     monkeypatch.setattr(orca, "_orca", command)
     orca._focus_pi.side_effect = focus
@@ -489,6 +510,109 @@ def test_handoff_launch_exact_resolved_path_terminal_surface_without_focus_or_pr
         (terminal_list(checkout), {"cwd": checkout, "timeout": orca.CALL_TIMEOUT}),
     ]
     assert not state_file(checkout).exists()
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_handoff_title_inferred_pi_without_binding_never_launches_or_focuses(monkeypatch, checkout, clock, pending):
+    terminal = live(checkout, title="review - pi")
+    if pending:
+        write_state(checkout, {"path": str(checkout), "pending": True})
+    query = replies(monkeypatch, {"terminals": [terminal]})
+    with pytest.raises(orca.HandoffError, match="unrecorded Pi terminal"):
+        orca.handoff(checkout)
+    query.assert_called_once_with(terminal_list(checkout), cwd=checkout, timeout=orca.CALL_TIMEOUT)
+    orca._focus_pi.assert_not_called()
+    assert not orca._binding_path(checkout).exists()
+    assert state_file(checkout).exists() is pending
+
+
+@pytest.mark.parametrize("changes", [
+    {"orphaned": True}, {"orphaned": None}, {"connected": False}, {"writable": False},
+    {"incarnationId": None}, {"handle": None},
+])
+@pytest.mark.parametrize("bound", [False, True])
+def test_handoff_uncertain_pi_does_not_authorize_launch(monkeypatch, checkout, clock, changes, bound):
+    if bound:
+        write_binding(checkout)
+    query = replies(monkeypatch, {"terminals": [live(checkout, **changes)]})
+    with pytest.raises(orca.HandoffError, match="uncertain liveness"):
+        orca.handoff(checkout)
+    query.assert_called_once()
+    orca._focus_pi.assert_not_called()
+    assert not state_file(checkout).exists()
+
+
+@pytest.mark.parametrize("missing", ["connected", "writable", "orphaned", "incarnationId", "handle"])
+def test_handoff_missing_pi_liveness_field_never_launches(monkeypatch, checkout, clock, missing):
+    terminal = live(checkout)
+    del terminal[missing]
+    query = replies(monkeypatch, {"terminals": [terminal]})
+    with pytest.raises(orca.HandoffError, match="uncertain liveness"):
+        orca.handoff(checkout)
+    query.assert_called_once()
+    orca._focus_pi.assert_not_called()
+
+
+@pytest.mark.parametrize("changes", [
+    {"handle": "another-terminal"}, {"incarnationId": "new-incarnation"}, {"ptyId": "another-pty"},
+])
+def test_handoff_changed_binding_never_launches_or_focuses(monkeypatch, checkout, clock, changes):
+    binding = write_binding(checkout, **changes)
+    query = replies(monkeypatch, {"terminals": [live(checkout)]})
+    with pytest.raises(orca.HandoffError, match="saved Pi terminal has changed"):
+        orca.handoff(checkout)
+    query.assert_called_once()
+    orca._focus_pi.assert_not_called()
+    assert json.loads(orca._binding_path(checkout).read_text()) == binding
+    assert not state_file(checkout).exists()
+
+
+@pytest.mark.parametrize("raw", ["not json", "null", "[]", "{}", '{"path": "/other/checkout"}'])
+def test_handoff_unreadable_binding_fails_closed(monkeypatch, checkout, clock, raw):
+    write_binding(checkout)
+    orca._binding_path(checkout).write_text(raw)
+    query = replies(monkeypatch, {"terminals": [live(checkout)]})
+    with pytest.raises(orca.HandoffError, match="Cannot verify the saved Pi terminal"):
+        orca.handoff(checkout)
+    query.assert_called_once()
+    orca._focus_pi.assert_not_called()
+    assert orca._binding_path(checkout).read_text() == raw
+
+
+def test_handoff_postlaunch_waits_for_exact_accepted_handle(monkeypatch, checkout, clock):
+    unrelated = live(checkout, handle="unrelated-pi", incarnationId="other-incarnation", ptyId="other-pty")
+    accepted = live(checkout)
+    query = replies(
+        monkeypatch, {"terminals": []}, launch_result(),
+        {"terminals": [unrelated]}, {"terminals": [unrelated, accepted]},
+    )
+    assert orca.handoff(checkout).startswith("Started")
+    assert clock.sleeps == [0.25]
+    assert query.call_count == 4
+    orca._focus_pi.assert_called_once_with("terminal-1", checkout)
+    assert json.loads(orca._binding_path(checkout).read_text()) == {
+        "path": str(checkout), "handle": "terminal-1", "incarnationId": "incarnation-1", "ptyId": "pty-1",
+    }
+
+
+def test_handoff_postlaunch_never_substitutes_another_live_pi(monkeypatch, checkout, clock):
+    def command(args, **_kwargs):
+        if args[:2] == ["agent", "launch"]:
+            return launch_result()
+        if orca.STATE_ROOT.exists() and state_file(checkout).exists():
+            return {"terminals": [live(checkout, handle="unrelated-pi")]}
+        return {"terminals": []}
+
+    query = Mock(side_effect=command)
+    monkeypatch.setattr(orca, "_orca", query)
+    with pytest.raises(orca.HandoffError, match="not yet confirmed live"):
+        orca.handoff(checkout)
+    orca._focus_pi.assert_not_called()
+    assert not orca._binding_path(checkout).exists()
+    assert read_state(checkout) == {
+        "path": str(checkout), "operationId": "operation-1", "handle": "terminal-1", "pending": True,
+    }
+    assert sum(call.args[0][:2] == ["agent", "launch"] for call in query.call_args_list) == 1
 
 
 def test_handoff_title_alone_does_not_reuse_a_terminal(monkeypatch, checkout, clock):
@@ -591,14 +715,16 @@ def test_handoff_malformed_outcome_preserves_nested_operation_id(monkeypatch, ch
 
 def test_handoff_waits_for_real_liveness_after_launch(monkeypatch, checkout, clock):
     query = replies(
-        monkeypatch, {"terminals": []}, launch_result(),
-        {"terminals": []}, {"terminals": [live(checkout, connected=False)]},
+        monkeypatch, {"terminals": []}, launch_result("verified-live-terminal"),
+        {"terminals": []}, {"terminals": [live(checkout, handle="verified-live-terminal", connected=False)]},
         {"terminals": [live(checkout, handle="verified-live-terminal")]},
     )
 
     def focus(handle, path):
         assert query.call_count == 5
-        assert read_state(checkout) == {"path": str(checkout), "operationId": "operation-1", "pending": True}
+        assert read_state(checkout) == {
+            "path": str(checkout), "operationId": "operation-1", "handle": "verified-live-terminal", "pending": True,
+        }
 
     orca._focus_pi.side_effect = focus
     assert orca.handoff(checkout) == "Started Pi and opened its worktree in Orca."
@@ -616,7 +742,7 @@ def test_handoff_liveness_deadline_preserves_operation(monkeypatch, checkout, cl
         calls.append((args, kwargs))
         if args[:2] == ["agent", "launch"]:
             return launch_result()
-        return {"terminals": [live(checkout, writable=False)]}
+        return {"terminals": [] if len(calls) == 1 else [live(checkout, writable=False)]}
 
     monkeypatch.setattr(orca, "_orca", command)
     with pytest.raises(orca.HandoffError, match="not yet confirmed live"):
@@ -625,7 +751,9 @@ def test_handoff_liveness_deadline_preserves_operation(monkeypatch, checkout, cl
     assert len(calls) == 42
     assert calls[-1][1]["timeout"] == 0.25
     orca._focus_pi.assert_not_called()
-    assert read_state(checkout) == {"path": str(checkout), "operationId": "operation-1", "pending": True}
+    assert read_state(checkout) == {
+        "path": str(checkout), "operationId": "operation-1", "handle": "terminal-1", "pending": True,
+    }
 
 
 def test_handoff_liveness_transport_failure_keeps_operation(monkeypatch, checkout, clock):
@@ -680,6 +808,7 @@ def test_handoff_lock_contention_has_bounded_wait(monkeypatch, checkout, clock):
 
 
 def test_handoff_acquires_lock_after_contention(monkeypatch, checkout, clock):
+    write_binding(checkout)
     monkeypatch.setattr(orca.fcntl, "flock", Mock(side_effect=[BlockingIOError, None]))
     query = replies(monkeypatch, {"terminals": [live(checkout)]})
     assert orca.handoff(checkout).startswith("Reused")
@@ -838,10 +967,29 @@ def test_handoff_requires_existing_path(tmp_path):
 
 
 def test_focus_pi_switches_verified_terminal_in_exact_checkout(monkeypatch, checkout):
-    query = replies(monkeypatch, {"handle": "verified-terminal"})
+    query = replies(monkeypatch, focus_result(checkout, "verified-terminal"))
     assert _FOCUS_PI("verified-terminal", checkout) is None
     query.assert_called_once_with(["terminal", "switch", "--terminal", "verified-terminal"], cwd=checkout)
     orca._run.assert_not_called()
+
+
+@pytest.mark.parametrize("changes", [
+    {"navigated": False}, {"navigated": 1}, {"handle": "other-terminal"},
+    {"tabId": ""}, {"tabId": None}, {"tabId": 1},
+    {"worktreeId": "repo-1::/other/checkout"}, {"worktreeId": None}, {"worktreeId": 1},
+])
+def test_focus_pi_requires_exact_confirmed_navigation(monkeypatch, checkout, changes):
+    query = replies(monkeypatch, focus_result(checkout, "verified-terminal", **changes))
+    with pytest.raises(orca.HandoffError, match="did not confirm opening"):
+        _FOCUS_PI("verified-terminal", checkout)
+    query.assert_called_once_with(["terminal", "switch", "--terminal", "verified-terminal"], cwd=checkout)
+
+
+@pytest.mark.parametrize("result", [{}, {"focus": None}, {"focus": []}, {"focus": "unknown"}])
+def test_focus_pi_malformed_confirmation_fails_closed(monkeypatch, checkout, result):
+    replies(monkeypatch, result)
+    with pytest.raises(orca.HandoffError, match="did not confirm opening"):
+        _FOCUS_PI("verified-terminal", checkout)
 
 
 def test_orca_passes_json_and_timeout_and_unwraps_result(monkeypatch, checkout):

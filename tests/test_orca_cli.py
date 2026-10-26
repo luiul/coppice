@@ -82,6 +82,9 @@ def test_reuse_does_not_repeat_creation_setup(monkeypatch, creation):
 
 
 def test_retry_runs_pending_setup_without_switch(monkeypatch, tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True, capture_output=True, timeout=10)
     monkeypatch.setattr(repo, "resolve_repo_root", lambda _: tmp_path)
     setup = SimpleNamespace()
     monkeypatch.setattr(orca, "prepare", lambda _: setup)
