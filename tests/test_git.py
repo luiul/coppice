@@ -294,3 +294,34 @@ def test_newest_dirty_mtime_counts_edits_to_tracked_files(tmp_path):
 
 def test_newest_dirty_mtime_reads_a_non_repo_as_unknown(tmp_path):
     assert git.newest_dirty_mtime(tmp_path / "not-a-repo") is None
+
+
+def test_newest_dirty_mtimes_batches_paths_keyed_by_string(tmp_path):
+    first, _ = _init_with_origin(tmp_path / "a")
+    second, _ = _init_with_origin(tmp_path / "b")
+    first_ts, second_ts = time.time() - 600, time.time() - 60
+    (first / "x.txt").write_text("uncommitted\n")
+    (second / "y.txt").write_text("uncommitted\n")
+    os.utime(first / "x.txt", (first_ts, first_ts))
+    os.utime(second / "y.txt", (second_ts, second_ts))
+
+    result = git.newest_dirty_mtimes([first, second, tmp_path / "not-a-repo"])
+
+    assert set(result) == {str(first), str(second), str(tmp_path / "not-a-repo")}
+    assert result[str(first)] == pytest.approx(first_ts)
+    assert result[str(second)] == pytest.approx(second_ts)
+    assert result[str(tmp_path / "not-a-repo")] is None
+
+
+def test_newest_dirty_mtimes_runs_one_status_per_unique_path(tmp_path, monkeypatch):
+    calls: list[str] = []
+    monkeypatch.setattr(git, "newest_dirty_mtime", lambda path: calls.append(str(path)) or 1.0)
+
+    result = git.newest_dirty_mtimes([tmp_path / "a", str(tmp_path / "a"), tmp_path / "b"])
+
+    assert sorted(calls) == [str(tmp_path / "a"), str(tmp_path / "b")]
+    assert result == {str(tmp_path / "a"): 1.0, str(tmp_path / "b"): 1.0}
+
+
+def test_newest_dirty_mtimes_of_nothing_is_empty():
+    assert git.newest_dirty_mtimes([]) == {}

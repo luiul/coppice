@@ -1263,7 +1263,7 @@ def test_list_modified_column_marks_stale_rows(tmp_path, monkeypatch):
     flat_output = result.output.replace("\n", "")
     assert "stale-branch" in flat_output
     # the stale row's Modified cell: '-' (moot once the directory is gone)
-    assert cli._modified_cell(entries[1]) == "[dim]-[/]"
+    assert cli._modified_cell(entries[1], {}) == "[dim]-[/]"
 
 
 def test_list_json_includes_last_modified(tmp_path, monkeypatch):
@@ -1289,6 +1289,88 @@ def test_list_json_includes_last_modified(tmp_path, monkeypatch):
     feature = next(e for e in data if e["branch"] == "feature")
     assert feature["last_modified"] == now - 2 * 86400
     assert "last_modified" in data[0]
+
+
+def test_list_rendering_never_launches_a_subprocess_for_modified_times(tmp_path, monkeypatch):
+    """Collection happens once, up front, in one batch per dirty worktree.
+    Rendering the Modified column must read the prepared values and never
+    call git itself (the old cell formatter ran `git status` per row)."""
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [
+        _entry("main", repo_dir, is_main=True, dirty=True),
+        _entry("dirty-a", tmp_path / "a", commit_ts=now - 5 * 86400, dirty=True),
+        _entry("dirty-b", tmp_path / "b", commit_ts=now - 6 * 86400, dirty=True),
+        _entry("clean", tmp_path / "c", commit_ts=now - 86400),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    single_calls: list[str] = []
+    batches: list[list[str]] = []
+    monkeypatch.setattr(git, "newest_dirty_mtime", lambda path: single_calls.append(str(path)))
+
+    def batch(paths):
+        paths = [str(p) for p in paths]  # the caller passes a one-shot generator
+        batches.append(sorted(paths))
+        return {p: now - 3600 for p in paths}
+
+    monkeypatch.setattr(git, "newest_dirty_mtimes", batch)
+
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "200"})
+
+    assert result.exit_code == 0, result.output
+    # One batch, covering exactly the displayed dirty rows (not main, not clean).
+    assert batches == [sorted([str(tmp_path / "a"), str(tmp_path / "b")])]
+    assert single_calls == []
+    assert result.output.count(" 1h ") >= 2
+
+
+def test_last_modified_requires_a_prepared_value_for_a_dirty_entry(tmp_path):
+    """A dirty entry missing from the batch is a caller bug. It must fail
+    loudly, not quietly read as 'unknown' and hide the worktree's edits."""
+    dirty = _entry("dirty", tmp_path / "d", commit_ts=1_000.0, dirty=True)
+    with pytest.raises(KeyError):
+        cli._last_modified_ts(dirty, {})
+
+
+def test_last_modified_clean_and_stale_entries_need_no_batch(tmp_path):
+    clean = _entry("clean", tmp_path / "c", commit_ts=1_000.0)
+    stale = _entry("stale", tmp_path / "gone", stale=True)
+    assert cli._last_modified_ts(clean, {}) == 1_000.0
+    assert cli._last_modified_ts(stale, {}) is None
+
+
+def test_clean_modified_collects_mtimes_in_one_batch_and_default_mode_collects_none(tmp_path, monkeypatch):
+    repo_dir = _init_repo(tmp_path / "repo")
+    _stub_wt(monkeypatch)
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [repo_dir])
+    monkeypatch.setattr(gh, "open_prs", lambda *_a, **_k: {})
+    now = 2_000_000_000.0
+    monkeypatch.setattr(cli.time, "time", lambda: now)
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("dirty", tmp_path / "d", commit_ts=now - 40 * 86400, dirty=True),
+        _entry("quiet", tmp_path / "q", commit_ts=now - 40 * 86400),
+    ]
+    monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    batches: list[list[str]] = []
+
+    def batch(paths):
+        paths = [str(p) for p in paths]  # the caller passes a one-shot generator
+        batches.append(sorted(paths))
+        return {p: now - 2 * 86400 for p in paths}
+
+    monkeypatch.setattr(git, "newest_dirty_mtimes", batch)
+
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--modified", "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert batches == [[str(tmp_path / "d")]]
+
+    batches.clear()
+    result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--dry-run"])
+    assert result.exit_code == 0, result.output
+    assert batches == [] or batches == [[]]
 
 
 def test_remove_without_wt_fails_clearly(tmp_path, monkeypatch):
