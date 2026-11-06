@@ -46,8 +46,7 @@ integration to your rc file:
 eval "$(coppice shell init zsh)"   # or: bash
 ```
 
-`fzf` (interactive picker for `cop remove`) and `gh` (open-PR detection
-for `cop clean`) are auto-detected, neither required.
+`fzf` (interactive picker for `cop remove`) and [`gh`](https://cli.github.com/) (PR information for `cop list` and open-PR detection for `cop clean`) are optional and auto-detected.
 
 ## Usage
 
@@ -62,6 +61,25 @@ cop remove my-branch          # remove a worktree by branch name
 Full reference, prompt behavior, and safety rails:
 [docs/commands.md](docs/commands.md). A full terminal session:
 [docs/demo.md](docs/demo.md).
+
+## PR visibility
+
+`cop list` shows a `PR` column for each listed worktree branch, even after its Orca tab closes.
+It checks open PRs in the GitHub repo named by `origin` each time you run the command.
+Draft PRs count as open, and PR numbers link to GitHub in terminals that support links.
+
+| PR cell | Meaning |
+|---|---|
+| `Open #123` | One or more open PRs match this repo and branch. |
+| `No open PR` | The lookup succeeded, but no open PR matched. |
+| `Unknown` | The lookup failed, timed out, or `gh` could not run. |
+| `N/A` | No supported GitHub origin exists, or the worktree has no branch. |
+
+Closed and merged PRs count as `No open PR`. This does not mean the branch never had a PR.
+Checks run once per repo, with concurrent lookups and timeouts. There is no persistent cache or background polling.
+Use `cop list --no-pr` to skip the lookup and hide the column.
+`cop list --json` stays unchanged and does not check PRs.
+Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
 
 ## Pi in Orca or Herdr
 

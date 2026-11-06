@@ -33,6 +33,7 @@ import typer
 from rich import box
 from rich.console import Console
 from rich.table import Table
+from rich.text import Text
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
@@ -1075,6 +1076,40 @@ def _list_sort_key(w: dict[str, Any]) -> tuple[int, float]:
     return (1, seconds if seconds is not None else float("inf"))
 
 
+def _collect_list_prs(worktrees_by_repo: dict[Path, list[dict[str, Any]]]) -> dict[Path, gh.PullRequestLookup]:
+    """One bounded GitHub lookup per repo with displayed branch rows."""
+    branches_by_repo = {
+        root: {w["branch"] for w in entries if not w.get("is_main") and w.get("branch")}
+        for root, entries in worktrees_by_repo.items()
+    }
+    pending = [root for root, branches in branches_by_repo.items() if branches]
+    if not pending:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(pending))) as pool:
+        results = pool.map(lambda root: gh.lookup_open_prs(root, branches_by_repo[root]), pending)
+        return dict(zip(pending, results, strict=True))
+
+
+def _pr_cell(w: dict[str, Any], lookup: gh.PullRequestLookup | None) -> Text:
+    """Render collected PR data without IO. A stale branch is still queryable."""
+    branch = w.get("branch")
+    if not branch or (lookup is not None and lookup.status == "unsupported"):
+        return Text("N/A", style="dim")
+    if lookup is None or lookup.status == "unknown":
+        return Text("Unknown", style="dim")
+    prs = lookup.prs.get(branch, ())
+    if not prs:
+        return Text("No open PR", style="dim")
+    cell = Text("Open ")
+    for i, pr in enumerate(prs):
+        if i:
+            cell.append(", ")
+        cell.append(f"#{pr.number}", style=f"link {pr.url}")
+    if not _is_stale(w) and _effectively_parked(w):
+        cell.stylize("dim")
+    return cell
+
+
 def _render_list(
     repos: list[Path],
     worktrees_by_repo: dict[Path, list[dict[str, Any]]],
@@ -1083,6 +1118,7 @@ def _render_list(
     size_cache: dict[Path, int] | None,
     show_all: bool,
     verbose: bool,
+    pr_lookups: dict[Path, gh.PullRequestLookup] | None = None,
 ) -> tuple[int, int, int, int]:
     """Render `list`'s worktree listing. Returns (worktree count, summed
     on-disk size in KB, stale count, hidden-repo count) for the caller's
@@ -1151,6 +1187,8 @@ def _render_list(
         table.add_column("Path")
     table.add_column("Working tree")
     table.add_column("Merge")
+    if pr_lookups is not None:
+        table.add_column("PR", max_width=16, overflow="fold")
 
     def _section_row(repo_root: Path, main_entry: dict[str, Any] | None, *, empty: bool) -> list[str]:
         """A repo's heading row (or its one-liner row, when EMPTY): name +
@@ -1166,6 +1204,8 @@ def _render_list(
             path = Path(main_entry["path"]) if main_entry is not None and main_entry.get("path") else repo_root
             cells.append(f"[dim]{_short_path(path, max_len=40)}[/]")
         cells += ["", ""]
+        if pr_lookups is not None:
+            cells.append("")
         return cells
 
     for i, (repo_root, main_entry, others) in enumerate(sections):
@@ -1185,7 +1225,13 @@ def _render_list(
                 w, show_size=show_size, size_cache=size_cache, verbose=verbose, indent="  "
             )
             total_kb += size_kb or 0
-            table.add_row(*cells, end_section=not last_section and j == len(ordered) - 1)
+            if pr_lookups is not None:
+                table.add_row(
+                    *cells, _pr_cell(w, pr_lookups.get(repo_root)),
+                    end_section=not last_section and j == len(ordered) - 1,
+                )
+            else:
+                table.add_row(*cells, end_section=not last_section and j == len(ordered) - 1)
     console.print(table)
     return total, total_kb, n_stale, n_hidden
 
@@ -1222,6 +1268,10 @@ def cmd_list(
             help="Add a Path column with each worktree's (and repo's) on-disk location.",
         ),
     ] = False,
+    show_pr: Annotated[
+        bool,
+        typer.Option("--pr/--no-pr", help="Show open GitHub PRs (needs gh and network); --no-pr skips lookup."),
+    ] = True,
 ) -> None:
     """List worktrees across every known repo, or just PATH.
 
@@ -1268,6 +1318,11 @@ def cmd_list(
         worktrees_by_repo: dict[Path, list[dict[str, Any]]] = wt.list_worktrees_many(repos)
         _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(repos))
 
+        pr_lookups: dict[Path, gh.PullRequestLookup] | None = None
+        if show_pr:
+            spinner.update("[dim]Checking open GitHub PRs…[/dim]")
+            pr_lookups = _collect_list_prs(worktrees_by_repo)
+
         size_cache: dict[Path, int] | None = None
         if show_size:
             all_paths = [p for worktrees in worktrees_by_repo.values() for p in _sizeable_paths(worktrees)]
@@ -1282,6 +1337,10 @@ def cmd_list(
 
         spinner.stop()
 
+    for root, lookup in (pr_lookups or {}).items():
+        if lookup.status == "unknown":
+            err.print(Text(f"PR lookup unavailable for {root.name}: {lookup.reason or 'unknown error'}.", style="dim"))
+
     total, total_kb, total_stale, n_hidden = _render_list(
         repos,
         worktrees_by_repo,
@@ -1289,6 +1348,7 @@ def cmd_list(
         size_cache=size_cache,
         show_all=show_all,
         verbose=verbose,
+        pr_lookups=pr_lookups,
     )
 
     if total == 0:
