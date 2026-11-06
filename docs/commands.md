@@ -43,12 +43,14 @@ cop unpark feat-a                         # follow-up arrived: back to active (s
 cop relocate                             # move mismatched worktrees (flagged '@ other-dir/' in cop list) back to their template paths
 cop relocate --dry-run                   # ...preview the moves, changing nothing
 cop relocate ~/dbt-models                # ...scoped to one repo
-cop list                                 # worktrees across every known repo (age, last modified, size, dirty/merge status, open PRs)
+cop list                                 # worktrees across every known repo (age, last modified, size, dirty/merge status, PR state)
 cop list ~/dbt-models                    # ...just this one
 cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)
 cop list --verbose                       # ...with a column for each worktree's on-disk path
 cop list --no-size                       # skip the (directory-walking) size column, for a faster listing
 cop list --no-pr                         # skip GitHub lookup and hide the PR column
+cop list --pr-detail                     # show all matching PRs and their URLs
+cop link-pr                              # attach the current worktree's displayed PR to Orca
 cop list --json                          # raw Worktrunk data and local fields, with no PR lookup
 cop remove add-customer-id-column        # remove a worktree by branch name (branch kept unless merged/-D; parked worktrees are refused: cop unpark first)
 cop remove a b --repo dbt-models --yes
@@ -68,27 +70,17 @@ bare `cop PATH` is shorthand for `cop new PATH`.
 
 ## PR information in list
 
-`cop list` includes a `PR` column by default. It does not depend on an open Orca workspace.
-The column shows `Open #123`, `No open PR`, `Unknown`, or `N/A`.
-Multiple open PRs show each number. Numbers link to GitHub where the terminal supports links.
-Draft PRs count as open. Closed and merged PRs count as `No open PR`, not proof that a branch never had a PR.
+`cop list` includes a `PR` column by default. It does not depend on an open Orca workspace. The column shows `Draft #123`, `Open #123`, `Merged #123`, `Closed #123`, `No PR`, `Unknown`, or `N/A`. PR numbers link to GitHub where the terminal supports links.
 
-The lookup uses [`gh`](https://cli.github.com/) and the repo's GitHub `origin`.
-It matches the PR's head repo and branch, so a fork with the same branch name cannot produce a false match.
-It reads every page of open PRs in one bounded `gh` operation per repo.
-Repos with branch rows are checked concurrently, with at most eight workers.
-Each GitHub operation has a 15-second timeout. Origin lookup has a 5-second timeout.
-There is no persistent cache or background polling.
+Open and draft PRs take priority over historical PRs. Among PRs with the same priority, the most recently updated comes first, with PR number as a tie breaker. `+N` shows the number of other matching PRs. `--pr-detail` prints every match and its URL. Branch names can be reused, so an older match does not prove that the current worktree is the original PR branch.
 
-`Unknown` means the lookup could not complete. A short stderr message gives the reason.
-`N/A` means there is no supported GitHub origin or no branch to check (detached HEAD).
-A stale worktree reference can still show PR information if it names a branch.
+The lookup uses [`gh`](https://cli.github.com/) and the repo's GitHub `origin`. It matches the PR's head repo and branch, so a fork with the same branch name cannot produce a false match. It reads every page in one bounded `gh` operation per repo. Repos with branch rows are checked concurrently, with at most eight workers. Each GitHub operation has a 15-second timeout. Origin lookup has a 5-second timeout. There is no persistent cache or background polling.
 
-Use `--no-pr` for a local listing without PR checks. It removes the column.
-`--pr` enables the default behavior explicitly.
-`--json` never performs this lookup or adds PR fields, even with `--pr`.
-Listing scope, `cop status`, cleanup decisions, and the `cop new` preview stay unchanged.
-Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
+`Unknown` means the lookup could not complete. A short stderr message gives the reason. `N/A` means there is no supported GitHub origin or no branch to check (detached HEAD). A stale worktree reference can still show PR information if it names a branch.
+
+Use `--no-pr` for a local listing without PR checks. It removes the column. `--pr` enables the default behavior explicitly. `--json` never performs this lookup or adds PR fields, even with `--pr`. `--pr-detail` cannot be combined with `--no-pr` or `--json`. Listing scope, `cop status`, cleanup decisions, and the `cop new` preview stay unchanged. Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
+
+Run `cop link-pr [PATH]` to attach the primary PR for that worktree to an existing Orca workspace. The command defaults to the current worktree. It refuses missing, ambiguous, or changed workspace identity, never creates a workspace, and does not change comments or status. If the add times out, its outcome is unknown; check Orca before retrying.
 
 ## Confirmation prompts
 

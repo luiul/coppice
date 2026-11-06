@@ -51,7 +51,7 @@ def listing(tmp_path, monkeypatch):
             },
         )
     )
-    monkeypatch.setattr(gh, "lookup_open_prs", lookup)
+    monkeypatch.setattr(gh, "lookup_prs", lookup)
     return root, entries, lookup
 
 
@@ -63,7 +63,7 @@ def test_list_default_pr_column(listing, width):
     assert result.exit_code == 0, result.output
     assert "PR" in result.stdout
     assert "Open #123" in result.stdout
-    assert "No open PR" in result.stdout
+    assert "No PR" in result.stdout
     assert "feature" in result.stdout
     assert result.stderr == ""
     lookup.assert_called_once_with(root, {"feature", "waiting"})
@@ -77,7 +77,7 @@ def test_list_lookup_outcomes(listing, status, label):
     result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "160"})
     assert result.exit_code == 0, result.output
     assert label in result.stdout
-    assert "No open PR" not in result.stdout
+    assert "No PR" not in result.stdout
     if status == "unknown":
         assert f"PR lookup unavailable for {root.name}" in result.stderr
         assert "gh not installed" in result.stderr
@@ -176,17 +176,87 @@ def test_pr_cell_links_each_number_without_io(monkeypatch):
             )
         },
     )
-    monkeypatch.setattr(gh, "lookup_open_prs", Mock(side_effect=AssertionError("rendering did IO")))
+    monkeypatch.setattr(gh, "lookup_prs", Mock(side_effect=AssertionError("rendering did IO")))
     cell = cli._pr_cell(_entry("feature", Path("/repo")), lookup)
-    assert cell.plain == "Open #1, #2"
+    assert cell.plain == "Open #1 +1"
     assert [span.style for span in cell.spans] == [
-        "link https://github.com/owner/repo/pull/1",
-        "link https://github.com/owner/repo/pull/2",
+        "cyan link https://github.com/owner/repo/pull/1",
+        "dim",
     ]
     console = Console(force_terminal=True, legacy_windows=False)
     with console.capture() as capture:
         console.print(cell)
     assert "\x1b]8;" in capture.get()
+
+
+@pytest.mark.parametrize(
+    "state,expected_style",
+    [
+        ("draft", "dim cyan"),
+        ("open", "cyan"),
+        ("merged", "green"),
+        ("closed", ""),
+    ],
+)
+def test_pr_cell_state_and_color(state, expected_style):
+    pr = gh.PullRequest(123, "https://github.com/owner/repo/pull/123", state)
+    cell = cli._pr_cell(_entry("feature", Path("/repo")), gh.PullRequestLookup("ok", {"feature": (pr,)}))
+    assert cell.plain == f"{state.title()} #123"
+    assert cell.style == expected_style
+
+
+def test_pr_detail_includes_each_url_and_state(listing):
+    _, _, lookup = listing
+    lookup.return_value = gh.PullRequestLookup(
+        "ok",
+        {
+            "feature": (
+                gh.PullRequest(7, "https://github.com/owner/repo/pull/7", "draft"),
+                gh.PullRequest(6, "https://github.com/owner/repo/pull/6", "merged"),
+            )
+        },
+    )
+    result = runner.invoke(cli.app, ["list", "--no-size", "--pr-detail"], env={"COLUMNS": "160"})
+    assert result.exit_code == 0, result.output
+    assert "Draft #7 +1" in result.stdout
+    assert "repo / feature: Draft #7 https://github.com/owner/repo/pull/7" in result.stdout
+    assert "repo / feature: Merged #6 https://github.com/owner/repo/pull/6" in result.stdout
+
+
+@pytest.mark.parametrize("flags", [["--no-pr"], ["--json"]])
+def test_pr_detail_rejects_incompatible_modes(listing, flags):
+    _, _, lookup = listing
+    result = runner.invoke(cli.app, ["list", "--pr-detail", *flags])
+    assert result.exit_code == 1
+    assert "--pr-detail cannot be combined" in result.stderr
+    lookup.assert_not_called()
+
+
+def test_pr_detail_preserves_long_urls_at_narrow_width(listing):
+    _, _, lookup = listing
+    url = "https://github.com/owner/" + "long-repo-name-" * 8 + "/pull/123"
+    lookup.return_value = gh.PullRequestLookup("ok", {"feature": (gh.PullRequest(123, url),)})
+    result = runner.invoke(cli.app, ["list", "--no-size", "--pr-detail"], env={"COLUMNS": "40"})
+    assert result.exit_code == 0, result.output
+    assert url in result.stdout
+
+
+def test_link_pr_ignores_git_environment_overrides(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setenv("GIT_DIR", "/wrong")
+    monkeypatch.setenv("GIT_CONFIG_COUNT", "1")
+    run = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, str(tmp_path)),
+            subprocess.CompletedProcess([], 0, "feature\n"),
+        ]
+    )
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    monkeypatch.setattr(gh, "lookup_prs", lambda *args: gh.PullRequestLookup("ok"))
+    result = runner.invoke(cli.app, ["link-pr", str(tmp_path)])
+    assert result.exit_code == 0
+    assert all(not any(key.startswith("GIT_") for key in call.kwargs["env"]) for call in run.call_args_list)
 
 
 def test_new_preview_table_unchanged(listing, monkeypatch):
@@ -220,13 +290,139 @@ def test_default_size_layout_multiple_long_pr_numbers(listing, monkeypatch, widt
     )
     result = runner.invoke(cli.app, ["list"], env={"COLUMNS": str(width)})
     assert result.exit_code == 0, result.output
-    for i in range(count):
-        assert f"#{1234567 + i}" in result.stdout
-    assert "No open PR" in result.stdout
+    assert "#1234567" in result.stdout
+    if count > 1:
+        assert f"+{count - 1}" in result.stdout
+    assert "No PR" in result.stdout
     assert "clean" in result.stdout
     assert "unmerged" in result.stdout
     assert "feature" in result.stdout
     assert "Size" in result.stdout
+
+
+def test_link_pr_submits_primary_and_never_changes_orca_implicitly(tmp_path, monkeypatch):
+    import subprocess
+
+    checkout = tmp_path.resolve()
+    run = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, str(checkout)),
+            subprocess.CompletedProcess([], 0, "feature\n"),
+        ]
+    )
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    lookup = Mock(
+        return_value=gh.PullRequestLookup(
+            "ok",
+            {
+                "feature": (
+                    gh.PullRequest(7, "https://github.com/owner/repo/pull/7", "open"),
+                    gh.PullRequest(6, "https://github.com/owner/repo/pull/6", "merged"),
+                )
+            },
+        )
+    )
+    monkeypatch.setattr(gh, "lookup_prs", lookup)
+    attach = Mock(return_value=1)
+    monkeypatch.setattr(cli.orca, "attach_pr_references", attach, raising=False)
+    result = runner.invoke(cli.app, ["link-pr", str(checkout)])
+    assert result.exit_code == 0, result.output
+    lookup.assert_called_once_with(checkout, ["feature"])
+    attach.assert_called_once_with(checkout, "feature", ["https://github.com/owner/repo/pull/7"])
+    assert "Submitted https://github.com/owner/repo/pull/7" in result.stdout
+
+
+@pytest.mark.parametrize("status", ["unknown", "unsupported"])
+def test_link_pr_unavailable_never_writes(tmp_path, monkeypatch, status):
+    import subprocess
+
+    run = Mock(
+        side_effect=[
+            subprocess.CompletedProcess([], 0, str(tmp_path)),
+            subprocess.CompletedProcess([], 0, "feature\n"),
+        ]
+    )
+    monkeypatch.setattr(cli.subprocess, "run", run)
+    monkeypatch.setattr(gh, "lookup_prs", lambda *args: gh.PullRequestLookup(status))
+    attach = Mock()
+    monkeypatch.setattr(cli.orca, "attach_pr_references", attach, raising=False)
+    result = runner.invoke(cli.app, ["link-pr", str(tmp_path)])
+    assert result.exit_code == 1
+    attach.assert_not_called()
+
+
+def test_link_pr_no_match_never_writes(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, str(tmp_path)),
+                subprocess.CompletedProcess([], 0, "feature\n"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(gh, "lookup_prs", lambda *args: gh.PullRequestLookup("ok"))
+    attach = Mock()
+    monkeypatch.setattr(cli.orca, "attach_pr_references", attach, raising=False)
+    result = runner.invoke(cli.app, ["link-pr", str(tmp_path)])
+    assert result.exit_code == 0
+    assert "No matching PR" in result.stdout
+    attach.assert_not_called()
+
+
+def test_link_pr_rejects_detached_and_missing_worktree(tmp_path, monkeypatch):
+    import subprocess
+
+    lookup = Mock()
+    monkeypatch.setattr(gh, "lookup_prs", lookup)
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, str(tmp_path)),
+                subprocess.CompletedProcess([], 1, ""),
+            ]
+        ),
+    )
+    result = runner.invoke(cli.app, ["link-pr", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "no checked-out branch" in result.stderr
+    lookup.assert_not_called()
+
+
+def test_link_pr_orca_failure_is_visible(tmp_path, monkeypatch):
+    import subprocess
+
+    monkeypatch.setattr(
+        cli.subprocess,
+        "run",
+        Mock(
+            side_effect=[
+                subprocess.CompletedProcess([], 0, str(tmp_path)),
+                subprocess.CompletedProcess([], 0, "feature\n"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(
+        gh,
+        "lookup_prs",
+        lambda *args: gh.PullRequestLookup(
+            "ok", {"feature": (gh.PullRequest(7, "https://github.com/owner/repo/pull/7"),)}
+        ),
+    )
+    monkeypatch.setattr(
+        cli.orca,
+        "attach_pr_references",
+        Mock(side_effect=cli.workflow.HandoffError("ambiguous workspace")),
+        raising=False,
+    )
+    result = runner.invoke(cli.app, ["link-pr", str(tmp_path)])
+    assert result.exit_code == 1
+    assert "ambiguous workspace" in result.stderr
 
 
 def test_collection_runs_repos_concurrently_with_worker_cap(monkeypatch):
@@ -248,7 +444,7 @@ def test_collection_runs_repos_concurrently_with_worker_cap(monkeypatch):
             with lock:
                 active -= 1
 
-    monkeypatch.setattr(gh, "lookup_open_prs", lookup)
+    monkeypatch.setattr(gh, "lookup_prs", lookup)
     roots = [Path(f"/repo/{i}") for i in range(16)]
     result = cli._collect_list_prs({root: [_entry("feature", root)] for root in roots})
     assert set(result) == set(roots)

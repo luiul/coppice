@@ -27,6 +27,11 @@ class GitError(RuntimeError):
         super().__init__(stderr.strip() or f"git {' '.join(args)} exited {returncode}")
 
 
+def clean_git_environment() -> dict[str, str]:
+    """Ignore inherited Git overrides when identifying a checkout or its remote."""
+    return {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+
 def _git(args: list[str], cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
     proc = subprocess.run(["git", "-C", str(cwd), *args], capture_output=True, text=True)
     if check and proc.returncode != 0:

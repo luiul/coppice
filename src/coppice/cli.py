@@ -1108,7 +1108,7 @@ def _collect_list_prs(worktrees_by_repo: dict[Path, list[dict[str, Any]]]) -> di
     if not pending:
         return {}
     with ThreadPoolExecutor(max_workers=min(8, len(pending))) as pool:
-        results = pool.map(lambda root: gh.lookup_open_prs(root, branches_by_repo[root]), pending)
+        results = pool.map(lambda root: gh.lookup_prs(root, branches_by_repo[root]), pending)
         return dict(zip(pending, results, strict=True))
 
 
@@ -1118,18 +1118,45 @@ def _pr_cell(w: dict[str, Any], lookup: gh.PullRequestLookup | None) -> Text:
     if not branch or (lookup is not None and lookup.status == "unsupported"):
         return Text("N/A", style="dim")
     if lookup is None or lookup.status == "unknown":
-        return Text("Unknown", style="dim")
+        return Text("Unknown", style="yellow")
     prs = lookup.prs.get(branch, ())
     if not prs:
-        return Text("No open PR", style="dim")
-    cell = Text("Open ")
-    for i, pr in enumerate(prs):
-        if i:
-            cell.append(", ")
-        cell.append(f"#{pr.number}", style=f"link {pr.url}")
+        return Text("No PR", style="dim")
+    pr = prs[0]
+    styles = {"open": _STYLE_UNMERGED, "draft": f"dim {_STYLE_UNMERGED}", "merged": _STYLE_MERGED, "closed": ""}
+    cell = Text(f"{pr.state.title()} ", style=styles[pr.state])
+    cell.append(f"#{pr.number}", style=f"{styles[pr.state]} link {pr.url}".strip())
+    if len(prs) > 1:
+        cell.append(f" +{len(prs) - 1}", style="dim")
     if not _is_stale(w) and _effectively_parked(w):
         cell.stylize("dim")
     return cell
+
+
+def _print_pr_details(
+    repos: list[Path],
+    worktrees_by_repo: dict[Path, list[dict[str, Any]]],
+    lookups: dict[Path, gh.PullRequestLookup],
+) -> None:
+    """Print each matching PR with its full URL, without further IO."""
+    lines: list[Text] = []
+    for root in sorted(repos, key=lambda path: path.name.lower()):
+        lookup = lookups.get(root)
+        if lookup is None or lookup.status != "ok":
+            continue
+        for w in sorted(worktrees_by_repo.get(root, []), key=_list_sort_key):
+            branch = w.get("branch")
+            if w.get("is_main") or not branch:
+                continue
+            for pr in lookup.prs.get(branch, ()):
+                line = Text(f"{root.name} / {branch}: {pr.state.title()} #{pr.number} ")
+                line.append(pr.url, style=f"link {pr.url}")
+                lines.append(line)
+    if lines:
+        console.print()
+        console.print("PR details:", style="bold")
+        for line in lines:
+            console.print(line, soft_wrap=True)
 
 
 def _render_list(
@@ -1293,14 +1320,21 @@ def cmd_list(
     ] = False,
     show_pr: Annotated[
         bool,
-        typer.Option("--pr/--no-pr", help="Show open GitHub PRs (needs gh and network); --no-pr skips lookup."),
+        typer.Option("--pr/--no-pr", help="Show GitHub PR states (needs gh and network); --no-pr skips lookup."),
     ] = True,
+    pr_detail: Annotated[
+        bool,
+        typer.Option("--pr-detail", help="Show every matching PR and link after the table."),
+    ] = False,
 ) -> None:
     """List worktrees across every known repo, or just PATH.
 
     Repos with no extra worktrees are hidden by default, they're the common
     case and bury the repos that do have some. --all/-a shows them.
     """
+    if pr_detail and (not show_pr or as_json):
+        raise _fail("--pr-detail cannot be combined with --no-pr or --json.")
+
     try:
         repos = repo.scope_repos(path)
     except repo.RepoResolutionError as exc:
@@ -1344,7 +1378,7 @@ def cmd_list(
 
         pr_lookups: dict[Path, gh.PullRequestLookup] | None = None
         if show_pr:
-            spinner.update("[dim]Checking open GitHub PRs…[/dim]")
+            spinner.update("[dim]Checking GitHub PRs…[/dim]")
             pr_lookups = _collect_list_prs(worktrees_by_repo)
 
         # The Modified column of every displayed (non-main) row, collected up
@@ -1382,6 +1416,9 @@ def cmd_list(
         dirty_mtimes=dirty_mtimes,
         pr_lookups=pr_lookups,
     )
+
+    if pr_detail and pr_lookups:
+        _print_pr_details(repos, worktrees_by_repo, pr_lookups)
 
     if total == 0:
         if n_hidden:
@@ -1427,6 +1464,50 @@ def cmd_list(
     if n_hidden:
         console.print(f"[dim]{_plural(n_hidden, 'more repo')} with no extra worktrees (show with: cop list --all)[/]")
     console.print()
+
+
+@app.command("link-pr", rich_help_panel="Inspect")
+def cmd_link_pr(
+    path: Annotated[str, typer.Argument(help="Worktree path. Defaults to the current directory.")] = ".",
+) -> None:
+    """Attach the displayed PR to an existing, unambiguous Orca workspace."""
+    target = Path(path).expanduser()
+    try:
+        top = subprocess.run(
+            ["git", "-C", str(target), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=git.clean_git_environment(),
+        )
+        if top.returncode != 0 or not top.stdout.strip():
+            raise _fail(f"not a Git worktree: {target}")
+        checkout = Path(top.stdout.strip()).resolve(strict=True)
+        head = subprocess.run(
+            ["git", "-C", str(checkout), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env=git.clean_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise _fail(f"cannot read the worktree: {exc}") from exc
+    branch = head.stdout.strip()
+    if head.returncode != 0 or not branch:
+        raise _fail("the worktree has no checked-out branch.")
+    lookup = gh.lookup_prs(checkout, [branch])
+    if lookup.status != "ok":
+        raise _fail(f"PR lookup unavailable: {lookup.reason or lookup.status}.")
+    prs = lookup.prs.get(branch, ())
+    if not prs:
+        console.print("No matching PR. No Orca reference was added.")
+        return
+    pr = prs[0]
+    try:
+        orca.attach_pr_references(checkout, branch, [pr.url])
+    except workflow.HandoffError as exc:
+        raise _fail(str(exc)) from exc
+    console.print(f"Submitted {pr.url} to Orca for {branch}.")
 
 
 def _open_vscode_windows(worktrees: dict[tuple[Path, str], Path]) -> set[tuple[Path, str]]:

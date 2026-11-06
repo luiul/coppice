@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import workflow
+from . import git, workflow
 from .workflow import (
     CALL_TIMEOUT,
     DISCOVERY_TIMEOUT,
@@ -65,6 +65,132 @@ def _orca(args: list[str], *, cwd: Path, timeout: float = CALL_TIMEOUT) -> dict[
     if not isinstance(payload, dict):
         raise OrcaError("transport_unknown", "Orca returned no structured result.")
     return payload
+
+
+def _pr_branch(path: Path, branch: str) -> None:
+    """Read HEAD from Git, not the workspace name or Orca's cached metadata."""
+    try:
+        # Inherited Git variables can redirect HEAD to a different checkout.
+        result = _run(
+            ["git", "symbolic-ref", "--quiet", "--short", "HEAD"],
+            cwd=path,
+            timeout=CALL_TIMEOUT,
+            env=git.clean_git_environment(),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OrcaError("branch_unknown", "Cannot verify the checkout branch; no references were added.") from exc
+    if result.returncode or not branch or result.stdout.strip() != branch:
+        raise OrcaError(
+            "branch_mismatch", "The checkout branch is missing, detached, or changed; no references were added."
+        )
+
+
+def _pr_worktree_identity(worktree: Any, host_ids: list[str]) -> tuple[str, str, str, str, str]:
+    """Validate identity fields before using an Orca row to select a workspace."""
+    if not isinstance(worktree, dict):
+        raise OrcaError("inventory_invalid", "Orca returned an invalid workspace; no references were added.")
+    identity = worktree.get("identity")
+    if not isinstance(identity, dict):
+        raise OrcaError("inventory_invalid", "Orca returned a workspace without identity; no references were added.")
+    key, host, instance = identity.get("key"), identity.get("executionHostId"), identity.get("instanceId")
+    path, repo_id, worktree_id = worktree.get("path"), worktree.get("repoId"), worktree.get("id")
+    if (
+        not all(
+            isinstance(value, str) and value and "\x00" not in value
+            for value in (key, host, instance, path, repo_id, worktree_id)
+        )
+        or not Path(path).is_absolute()
+        or host not in host_ids
+        or worktree.get("hostId") != host
+        or worktree.get("instanceId") != instance
+        or worktree_id != f"{repo_id}::{path}"
+    ):
+        raise OrcaError(
+            "inventory_invalid", "Orca returned inconsistent workspace identity or path; no references were added."
+        )
+    return key, host, path, instance, repo_id
+
+
+def attach_pr_references(path: Path, branch: str, urls: list[str]) -> int:
+    """Submit validated URLs to one verified local workspace, without creating one.
+
+    The return value is the number submitted, not the number of newly added links.
+    A failed add may have taken effect and must not be retried automatically.
+    """
+    if not urls:
+        return 0
+    try:
+        canonical = path.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise OrcaError("path_unknown", "Cannot resolve the checkout path; no references were added.") from exc
+    _pr_branch(canonical, branch)
+    inventory = _orca(["worktree", "list", "--limit", "10000"], cwd=canonical)
+    scope = inventory.get("hostScope")
+    rows = inventory.get("worktrees")
+    if (
+        not isinstance(scope, dict)
+        or not isinstance(scope.get("hostIds"), list)
+        or not scope["hostIds"]
+        or any(not isinstance(host, str) or not host for host in scope["hostIds"])
+        or len(set(scope["hostIds"])) != len(scope["hostIds"])
+        or "local" not in scope["hostIds"]
+        or scope.get("omittedHostIds") != []
+        or inventory.get("truncated") is not False
+        or not isinstance(rows, list)
+        or type(inventory.get("totalCount")) is not int
+        or inventory["totalCount"] != len(rows)
+    ):
+        raise OrcaError(
+            "inventory_incomplete", "Orca's workspace inventory is incomplete or invalid; no references were added."
+        )
+    host_ids = scope["hostIds"]
+    keys: set[str] = set()
+    matches: list[tuple[str, str, str, str, str]] = []
+    for row in rows:
+        identity = _pr_worktree_identity(row, host_ids)
+        key, host, row_path, _, _ = identity
+        if key in keys:
+            raise OrcaError(
+                "inventory_invalid", "Orca returned duplicate workspace identities; no references were added."
+            )
+        keys.add(key)
+        try:
+            # Remote paths belong to another machine. Never resolve them locally.
+            candidate = Path(row_path).resolve(strict=False) if host == "local" else Path(row_path)
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise OrcaError(
+                "inventory_invalid", "Cannot inspect an Orca workspace path; no references were added."
+            ) from exc
+        if candidate == canonical:
+            matches.append(identity)
+    if not matches:
+        raise OrcaError("workspace_not_found", "No Orca workspace matches this checkout; no references were added.")
+    if len(matches) != 1 or matches[0][1] != "local":
+        raise OrcaError(
+            "workspace_ambiguous", "Orca workspace identity is ambiguous or remote; no references were added."
+        )
+    identity = matches[0]
+    key, _, row_path, _, _ = identity
+    selector = f"identity:{key}"
+    current = _orca(["worktree", "show", "--worktree", selector], cwd=canonical)
+    if _pr_worktree_identity(current.get("worktree"), host_ids) != identity:
+        raise OrcaError("workspace_changed", "The Orca workspace changed; no references were added.")
+    try:
+        path_unchanged = path.resolve(strict=True) == canonical and Path(row_path).resolve(strict=True) == canonical
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise OrcaError("path_unknown", "Cannot verify the checkout path; no references were added.") from exc
+    if not path_unchanged:
+        raise OrcaError("workspace_changed", "The checkout path changed; no references were added.")
+    _pr_branch(canonical, branch)
+    try:
+        _orca(["reference", "add", *urls, "--worktree", selector], cwd=canonical)
+    except OrcaError as exc:
+        raise OrcaError(
+            "add_outcome_unknown",
+            "Orca could not confirm the reference add. It may have succeeded; inspect the workspace before retrying.",
+            {"cause": exc.code},
+        ) from exc
+    return len(urls)
 
 
 def manual_invocation() -> bool:

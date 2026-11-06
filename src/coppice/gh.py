@@ -1,6 +1,6 @@
 """Best-effort GitHub PR lookups via the `gh` CLI.
 
-`cop list` uses a structured result to distinguish no open PR from an
+`cop list` uses a structured result to distinguish no PR from an
 unavailable lookup. The legacy `open_prs` helper keeps its cleanup contract.
 """
 
@@ -12,8 +12,11 @@ import shutil
 import subprocess
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
+
+from .git import clean_git_environment
 
 # The repo-name group deliberately allows dots: `[^/.]+?` (excluding dots)
 # used to be the pattern, which silently failed to match any GitHub repo
@@ -38,6 +41,8 @@ _REMOTE_TIMEOUT = 5
 class PullRequest:
     number: int
     url: str
+    state: Literal["open", "draft", "merged", "closed"] = "open"
+    updated_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -47,8 +52,8 @@ class PullRequestLookup:
     reason: str | None = None
 
 
-def lookup_open_prs(repo: Path, branches: Iterable[str]) -> PullRequestLookup:
-    """Fetch every open PR once per repo, including drafts and all pages.
+def lookup_prs(repo: Path, branches: Iterable[str]) -> PullRequestLookup:
+    """Fetch all PRs once per repo, including drafts and all pages.
 
     Match both head repo and branch to avoid collisions with fork branches.
     No persistent cache or cleanup policy changes. Failed or incomplete
@@ -63,6 +68,7 @@ def lookup_open_prs(repo: Path, branches: Iterable[str]) -> PullRequestLookup:
             capture_output=True,
             text=True,
             timeout=_REMOTE_TIMEOUT,
+            env=clean_git_environment(),
         )
     except (OSError, subprocess.TimeoutExpired):
         return PullRequestLookup("unknown", reason="origin lookup failed")
@@ -89,7 +95,7 @@ def lookup_open_prs(repo: Path, branches: Iterable[str]) -> PullRequestLookup:
                 "GET",
                 "--paginate",
                 "--slurp",
-                f"repos/{slug}/pulls?state=open&per_page=100",
+                f"repos/{slug}/pulls?state=all&per_page=100",
             ],
             capture_output=True,
             text=True,
@@ -109,7 +115,7 @@ def lookup_open_prs(repo: Path, branches: Iterable[str]) -> PullRequestLookup:
         canonical_slug: str | None = None
         for page in pages:
             for pr in page:
-                if not isinstance(pr, dict) or pr.get("state") != "open":
+                if not isinstance(pr, dict) or pr.get("state") not in ("open", "closed"):
                     raise ValueError("invalid PR")
                 # The response base repo carries the canonical identity
                 # after GitHub follows a repository rename or transfer.
@@ -142,9 +148,40 @@ def lookup_open_prs(repo: Path, branches: Iterable[str]) -> PullRequestLookup:
                     raise ValueError("invalid head repo")
                 branch = head["ref"]
                 if branch in wanted and head_repo["full_name"].casefold() == canonical_slug:
-                    found.setdefault(branch, []).append(PullRequest(number, url))
+                    draft, merged_at, updated_at = pr.get("draft"), pr.get("merged_at"), pr.get("updated_at")
+                    if (
+                        type(draft) is not bool
+                        or "merged_at" not in pr
+                        or not isinstance(updated_at, str)
+                        or not updated_at
+                    ):
+                        raise ValueError("invalid PR lifecycle fields")
+                    # Parse the timestamps so a malformed date cannot silently change ordering.
+                    updated = datetime.fromisoformat(updated_at.replace("Z", "+00:00"))
+                    if updated.tzinfo is None:
+                        raise ValueError("missing timestamp timezone")
+                    if merged_at is not None:
+                        if not isinstance(merged_at, str) or not merged_at:
+                            raise ValueError("invalid merge timestamp")
+                        if datetime.fromisoformat(merged_at.replace("Z", "+00:00")).tzinfo is None:
+                            raise ValueError("missing merge timestamp timezone")
+                    if pr["state"] == "open":
+                        if merged_at is not None:
+                            raise ValueError("open PR has merge timestamp")
+                        state = "draft" if draft else "open"
+                    else:
+                        state = "merged" if merged_at is not None else "closed"
+                    found.setdefault(branch, []).append(
+                        PullRequest(number, url, state, updated.astimezone(UTC).isoformat())
+                    )
         return PullRequestLookup(
-            "ok", {branch: tuple(sorted(prs, key=lambda pr: pr.number)) for branch, prs in found.items()}
+            "ok",
+            {
+                branch: tuple(
+                    sorted(prs, key=lambda pr: (pr.state in ("open", "draft"), pr.updated_at, pr.number), reverse=True)
+                )
+                for branch, prs in found.items()
+            },
         )
     except (ValueError, TypeError):
         return PullRequestLookup("unknown", reason="invalid GitHub response")

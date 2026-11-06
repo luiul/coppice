@@ -64,22 +64,21 @@ Full reference, prompt behavior, and safety rails:
 
 ## PR visibility
 
-`cop list` shows a `PR` column for each listed worktree branch, even after its Orca tab closes.
-It checks open PRs in the GitHub repo named by `origin` each time you run the command.
-Draft PRs count as open, and PR numbers link to GitHub in terminals that support links.
+`cop list` shows a `PR` column for each listed worktree branch, even after its Orca tab closes. It checks PRs in the GitHub repo named by `origin` each time you run the command.
 
 | PR cell | Meaning |
 |---|---|
-| `Open #123` | One or more open PRs match this repo and branch. |
-| `No open PR` | The lookup succeeded, but no open PR matched. |
+| `Draft #123` | An open draft PR matches this repo and branch. |
+| `Open #123` | An open PR is ready for review. |
+| `Merged #123` | The PR was merged. |
+| `Closed #123` | The PR was closed without merging. |
+| `No PR` | A complete lookup found no matching PR. |
 | `Unknown` | The lookup failed, timed out, or `gh` could not run. |
 | `N/A` | No supported GitHub origin exists, or the worktree has no branch. |
 
-Closed and merged PRs count as `No open PR`. This does not mean the branch never had a PR.
-Checks run once per repo, with concurrent lookups and timeouts. There is no persistent cache or background polling.
-Use `cop list --no-pr` to skip the lookup and hide the column.
-`cop list --json` stays unchanged and does not check PRs.
-Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
+Open and draft PRs take priority. Otherwise, the most recently updated closed or merged PR appears. `+N` means other PRs also match. Run `cop list --pr-detail` to see all matching PRs and URLs. A match uses the branch name and repo, so a deleted and reused branch can match an older PR.
+
+Use `cop link-pr PATH` to attach the displayed PR to an existing Orca workspace. It refuses an ambiguous workspace and does not create one. Use `cop list --no-pr` to skip the lookup. `cop list --json` stays unchanged and does not check PRs. Lookups use complete pagination and bounded concurrent calls, without a cache. Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
 
 ## Pi in Orca or Herdr
 
