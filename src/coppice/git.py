@@ -189,6 +189,22 @@ def newest_dirty_mtime(path: str | Path) -> float | None:
     return newest
 
 
+def newest_dirty_mtimes(paths: Iterable[str | Path]) -> dict[str, float | None]:
+    """`newest_dirty_mtime` for every path in PATHS, run concurrently.
+
+    Keyed by `str(path)`. Each call is one `git status` subprocess, so a
+    thread pool overlaps the waits the way `wt.list_worktrees_many` does,
+    capped at 8 concurrent children. Dedupes PATHS first and skips the pool
+    for 0 or 1 paths, there is nothing to overlap.
+    """
+    unique = list(dict.fromkeys(str(p) for p in paths))
+    if len(unique) <= 1:
+        return {p: newest_dirty_mtime(p) for p in unique}
+    with ThreadPoolExecutor(max_workers=min(len(unique), 8)) as pool:
+        futures = {p: pool.submit(newest_dirty_mtime, p) for p in unique}
+        return {p: f.result() for p, f in futures.items()}
+
+
 def dirty_flags(path: str | Path) -> dict[str, bool]:
     """The worktree at PATH's dirtiness as the same flag dict `wt list`
     reports under `working_tree` (any flag set == dirty), from one

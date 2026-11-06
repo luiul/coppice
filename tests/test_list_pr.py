@@ -194,7 +194,7 @@ def test_new_preview_table_unchanged(listing, monkeypatch):
     monkeypatch.setattr(wt, "list_worktrees", lambda root: entries)
     cli._print_existing_worktrees(listing[0])
     lookup.assert_not_called()
-    table, _, _ = cli._worktrees_table(entries[1:], show_size=False)
+    table, _, _ = cli._worktrees_table(entries[1:], show_size=False, dirty_mtimes={})
     assert [column.header for column in table.columns] == [
         "Branch",
         "Created",

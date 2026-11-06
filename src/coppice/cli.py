@@ -23,7 +23,7 @@ import shutil
 import subprocess
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from pathlib import Path
@@ -176,7 +176,7 @@ def _print_existing_worktrees(repo_root: Path) -> None:
     if not others:
         return
     console.print(f"Existing worktrees for {_repo_header(repo_root)}:")
-    table, _total_kb, _n_stale = _worktrees_table(others, show_size=False)
+    table, _total_kb, _n_stale = _worktrees_table(others, show_size=False, dirty_mtimes=_collect_dirty_mtimes(others))
     console.print(table)
     console.print()
 
@@ -714,7 +714,19 @@ def _age_cell(entry: dict[str, Any]) -> str:
     return f"[{_STYLE_STALE}]{label}[/]" if _is_stale(entry) else label
 
 
-def _last_modified_ts(entry: dict[str, Any]) -> float | None:
+def _collect_dirty_mtimes(worktrees: Iterable[dict[str, Any]]) -> dict[str, float | None]:
+    """Newest changed-file mtime for every dirty, non-stale entry in
+    WORKTREES, keyed by path: one batched, bounded `git status` per dirty
+    worktree (see `git.newest_dirty_mtimes`). Collected once before
+    rendering so `_last_modified_ts` and the helpers built on it never
+    launch a subprocess themselves. Clean entries need nothing: their last
+    modification is their last commit."""
+    return git.newest_dirty_mtimes(
+        w["path"] for w in worktrees if w.get("path") and not _is_stale(w) and _is_dirty(w)
+    )
+
+
+def _last_modified_ts(entry: dict[str, Any], dirty_mtimes: dict[str, float | None]) -> float | None:
     """Epoch time ENTRY's worktree was last modified: the later of its
     branch's last-commit time and the newest mtime among its changed or
     untracked files (git.newest_dirty_mtime). That combination answers
@@ -725,6 +737,11 @@ def _last_modified_ts(entry: dict[str, Any]) -> float | None:
     pays no extra subprocess. None when nothing is known (a stale entry's
     directory is already gone; no commit time and a failed walk).
 
+    DIRTY_MTIMES is the batch `_collect_dirty_mtimes` prepared up front.
+    This function never reads the filesystem itself: a dirty entry missing
+    from the batch is a caller bug and raises KeyError, rather than
+    silently reading as "unknown".
+
     The same definition understory's own applyModifiedTime applies, so
     the two tools must not drift apart here.
     """
@@ -733,13 +750,13 @@ def _last_modified_ts(entry: dict[str, Any]) -> float | None:
     commit_ts = entry.get("commit", {}).get("timestamp") or 0
     if not _is_dirty(entry):
         return float(commit_ts) if commit_ts else None
-    newest = git.newest_dirty_mtime(entry["path"])
+    newest = dirty_mtimes[entry["path"]]
     if newest is None:
         return float(commit_ts) if commit_ts else None
     return max(newest, float(commit_ts)) if commit_ts else newest
 
 
-def _modified_seconds(entry: dict[str, Any]) -> float | None:
+def _modified_seconds(entry: dict[str, Any], dirty_mtimes: dict[str, float | None]) -> float | None:
     """Seconds since ENTRY's worktree was last modified (see
     `_last_modified_ts`): the inactivity age `clean --modified` sweeps by.
     Answers "when did someone last work here", where `_age_seconds`
@@ -747,11 +764,11 @@ def _modified_seconds(entry: dict[str, Any]) -> float | None:
     uncommitted edits is active, not abandoned, and must survive an
     age-based sweep. None when nothing is known.
     """
-    ts = _last_modified_ts(entry)
+    ts = _last_modified_ts(entry, dirty_mtimes)
     return time.time() - ts if ts is not None else None
 
 
-def _modified_cell(entry: dict[str, Any]) -> str:
+def _modified_cell(entry: dict[str, Any], dirty_mtimes: dict[str, float | None]) -> str:
     """Rich-markup Modified cell for worktree tables: `_humanize_age`'s
     compact label of the time since `_last_modified_ts`, '-' for a stale
     entry (its directory is already gone, and `clean`/`remove` are its
@@ -760,7 +777,7 @@ def _modified_cell(entry: dict[str, Any]) -> str:
     """
     if _is_stale(entry):
         return "[dim]-[/]"
-    ts = _last_modified_ts(entry)
+    ts = _last_modified_ts(entry, dirty_mtimes)
     return _humanize_age(max(0.0, time.time() - ts)) if ts is not None else "?"
 
 
@@ -929,6 +946,7 @@ def _worktree_cells(
     *,
     show_size: bool,
     size_cache: dict[Path, int] | None,
+    dirty_mtimes: dict[str, float | None],
     verbose: bool = False,
     indent: str = "",
 ) -> tuple[list[str], int | None]:
@@ -988,7 +1006,7 @@ def _worktree_cells(
         age_cell = f"{_age_label(w)} · follow-up"
 
     size_kb = _worktree_size_kb(w, size_cache) if show_size else None
-    cells = [branch_cell, age_cell, _modified_cell(w)]
+    cells = [branch_cell, age_cell, _modified_cell(w, dirty_mtimes)]
     if show_size:
         cells.append(sizes.human_kb(size_kb) if size_kb is not None else "-")
     if verbose:
@@ -1004,7 +1022,11 @@ def _worktree_cells(
 
 
 def _worktrees_table(
-    worktrees: list[dict[str, Any]], *, show_size: bool = True, size_cache: dict[Path, int] | None = None
+    worktrees: list[dict[str, Any]],
+    *,
+    dirty_mtimes: dict[str, float | None],
+    show_size: bool = True,
+    size_cache: dict[Path, int] | None = None,
 ) -> tuple[Table, int, int]:
     """Rich table for WORKTREES, one `_worktree_cells` row each.
 
@@ -1034,7 +1056,7 @@ def _worktrees_table(
     n_stale = 0
     for w in worktrees:
         n_stale += 1 if _is_stale(w) else 0
-        cells, size_kb = _worktree_cells(w, show_size=show_size, size_cache=size_cache)
+        cells, size_kb = _worktree_cells(w, show_size=show_size, size_cache=size_cache, dirty_mtimes=dirty_mtimes)
         total_kb += size_kb or 0
         table.add_row(*cells)
 
@@ -1118,6 +1140,7 @@ def _render_list(
     size_cache: dict[Path, int] | None,
     show_all: bool,
     verbose: bool,
+    dirty_mtimes: dict[str, float | None],
     pr_lookups: dict[Path, gh.PullRequestLookup] | None = None,
 ) -> tuple[int, int, int, int]:
     """Render `list`'s worktree listing. Returns (worktree count, summed
@@ -1222,7 +1245,7 @@ def _render_list(
         for j, w in enumerate(ordered):
             n_stale += 1 if _is_stale(w) else 0
             cells, size_kb = _worktree_cells(
-                w, show_size=show_size, size_cache=size_cache, verbose=verbose, indent="  "
+                w, show_size=show_size, size_cache=size_cache, dirty_mtimes=dirty_mtimes, verbose=verbose, indent="  "
             )
             total_kb += size_kb or 0
             if pr_lookups is not None:
@@ -1296,10 +1319,11 @@ def cmd_list(
 
         worktrees_by_repo = wt.list_worktrees_many(repos)
         _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(repos))
+        dirty_mtimes = _collect_dirty_mtimes(w for worktrees in worktrees_by_repo.values() for w in worktrees)
         merged: list[dict[str, Any]] = []
         for repo_root in repos:
             for entry in worktrees_by_repo[repo_root]:
-                merged.append({**entry, "repo": repo_root.name, "last_modified": _last_modified_ts(entry)})
+                merged.append({**entry, "repo": repo_root.name, "last_modified": _last_modified_ts(entry, dirty_mtimes)})
         # Plain print, not console.print: Rich soft-wraps at console width
         # (80 columns when stdout is a pipe), inserting literal newlines
         # inside JSON strings, 'cop list --json | jq' used to get invalid
@@ -1322,6 +1346,13 @@ def cmd_list(
         if show_pr:
             spinner.update("[dim]Checking open GitHub PRs…[/dim]")
             pr_lookups = _collect_list_prs(worktrees_by_repo)
+
+        # The Modified column of every displayed (non-main) row, collected up
+        # front so rendering stays free of subprocesses.
+        spinner.update("[dim]Reading modification times…[/dim]")
+        dirty_mtimes = _collect_dirty_mtimes(
+            w for worktrees in worktrees_by_repo.values() for w in worktrees if not w.get("is_main")
+        )
 
         size_cache: dict[Path, int] | None = None
         if show_size:
@@ -1348,6 +1379,7 @@ def cmd_list(
         size_cache=size_cache,
         show_all=show_all,
         verbose=verbose,
+        dirty_mtimes=dirty_mtimes,
         pr_lookups=pr_lookups,
     )
 
@@ -2149,6 +2181,19 @@ def cmd_clean(
     # with --parked).
     _enrich_parked(worktrees_by_repo, park_mod.parked_at_many(scope))
 
+    # Only --modified reads modification times. Collect them up front, in one
+    # bounded batch, for exactly the worktrees pass 1 can classify.
+    dirty_mtimes: dict[str, float | None] = (
+        _collect_dirty_mtimes(
+            w
+            for worktrees in worktrees_by_repo.values()
+            for w in worktrees
+            if not w.get("is_main") and not w.get("is_current")
+        )
+        if modified
+        else {}
+    )
+
     # Pass 1, per repo, local only (no subprocess): stale, too-young/
     # unmerged, dirty. Whatever's left after those needs an open-PR check
     # and an on-disk size, both of which used to happen one worktree at a
@@ -2208,7 +2253,7 @@ def cmd_clean(
                     )
                 continue
 
-            seconds = _modified_seconds(w) if modified else _age_seconds(w)
+            seconds = _modified_seconds(w, dirty_mtimes) if modified else _age_seconds(w)
             age_label = _humanize_age(seconds) if seconds is not None else "?"
 
             if not parked and _effectively_parked(w):
