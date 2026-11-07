@@ -100,14 +100,13 @@ All three commands accept a repo path, including a subdirectory or linked worktr
 
 `cop orca` registers the main checkout and shows external worktrees. You no longer need to call `owa` first. That helper remains available for watch-only use. Orca's native worktree creation is not used.
 
-`cop herdr` opens the existing wt checkout with Herdr's public worktree command. Inside Herdr it targets the caller's socket. Outside Herdr it targets the running default session. Use `--session NAME` to select another running session. It does not start a server or create native Herdr worktrees. The global wt config has no Herdr launch hook.
+`cop herdr` needs the Worktrunk helper `wt-herdr` on PATH. It checks the Herdr app and Core before creating a checkout. After setup, it passes the exact repo and checkout paths to the helper. The helper owns space grouping, Pi reuse and launch, and terminal focus. Legacy Herdr sessions and `--session` are not supported. The global wt config has no Herdr launch hook.
 
-Setup has a 240-second deadline. Calls and launch readiness are bounded. Orca discovery waits at most 45 seconds. If a handoff fails after creation, the checkout remains and shell navigation still works; the command returns a failure status and prints a complete retry with the repo and branch.
+Setup has a 240-second deadline. Calls and launch readiness are bounded. Orca discovery waits at most 45 seconds. Herdr helper checks have a 10-second deadline, and opening has a 90-second deadline. If a handoff fails after creation, the checkout remains and shell navigation still works; the command returns a failure status and prints a complete retry with the repo and branch.
 
 ```zsh
 cop orca /path/to/repo --branch fix-import --yes
 cop herdr /path/to/repo --branch fix-import --yes
-cop herdr /path/to/repo --branch fix-import --yes --session work
 ```
 
 Retries finish pending setup, safely reuse Pi, and focus its terminal. They do not create an extra worktree or agent. If a launch or terminal identity is uncertain, Coppice stops rather than risk a duplicate. A title alone is not proof of a running Pi.

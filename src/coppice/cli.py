@@ -253,14 +253,13 @@ def cmd_herdr(
     branch: Annotated[str | None, typer.Option("--branch", "-b", help="Branch name. Prompts if omitted.")] = None,
     base: Annotated[str | None, typer.Option("--base", "-B", help="Base branch/ref. Defaults to the repo's default branch.")] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation when the branch exists.")] = False,
-    session: Annotated[str | None, typer.Option("--session", help="Running Herdr session. Defaults to the caller or default session.")] = None,
 ) -> None:
     """Create or reuse a wt worktree, then open Pi in Herdr and enter its directory."""
-    _create_worktree(path, branch, base, yes, surface="herdr", session=session)
+    _create_worktree(path, branch, base, yes, surface="herdr")
 
 
 def _create_worktree(
-    path: str, branch: str | None, base: str | None, yes: bool, *, surface: str | None, session: str | None = None
+    path: str, branch: str | None, base: str | None, yes: bool, *, surface: str | None
 ) -> None:
     """Shared worktree workflow. Explicit orchestrator commands add their handoff."""
     try:
@@ -317,7 +316,7 @@ def _create_worktree(
             if surface == "orca":
                 setup = orca.prepare_workflow(repo_root)
             else:
-                setup, herdr_target = herdr.prepare_workflow(repo_root, session)
+                setup, herdr_target = herdr.prepare_workflow(repo_root)
         except (workflow.HandoffError, OSError) as exc:
             raise _fail(str(exc)) from exc
 
@@ -384,8 +383,6 @@ def _create_worktree(
             except (workflow.HandoffError, OSError) as exc:
                 console.print(f"Worktree exists, but the {surface.title()} handoff failed: {exc}", markup=False)
                 args = ["cop", surface, str(repo_root), "--branch", branch, "--yes"]
-                if surface == "herdr" and session:
-                    args += ["--session", session]
                 console.print(f"Retry: {shlex.join(args)}", markup=False)
                 raise typer.Exit(1) from exc
 

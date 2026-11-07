@@ -21,7 +21,7 @@ def _guards(monkeypatch, *surfaces):
     names = {
         orca: ("prepare_workflow", "prepare", "watch", "handoff", "_orca", "_run",
                "switch_ready", "finish_setup", "resume_setup"),
-        herdr: ("prepare_workflow", "handoff", "_focus"),
+        herdr: ("prepare_workflow", "handoff"),
     }
     for surface in surfaces:
         for name in names[surface]:
@@ -65,11 +65,10 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "registry" / "known-repos")
     repo.register_repo(root)
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "orca-state")
-    monkeypatch.setattr(herdr, "STATE_ROOT", tmp_path / "herdr-state")
     monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "setup-state")
     monkeypatch.setattr(cli.console, "width", 1000)
     monkeypatch.setattr(cli.err, "width", 1000)
-    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/fake/{name}" if name in {"wt", "orca", "herdr"} else None)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/fake/{name}" if name in {"wt", "orca", "wt-herdr"} else None)
     monkeypatch.setattr(wt, "require_wt", Mock(return_value="/fake/wt"))
     monkeypatch.setattr(repo, "default_branch", Mock(return_value="main"))
     monkeypatch.setattr(wt, "branch_exists", Mock(return_value=False))
@@ -189,7 +188,7 @@ def test_plain_commands_have_zero_orchestrator_calls(monkeypatch, isolated, case
         assert park.parked_at(c.root) == {}
     assert c.checkout.is_dir()
     assert not orca.STATE_ROOT.exists()
-    assert not herdr.STATE_ROOT.exists()
+    assert not (c.root.parent / "herdr-state").exists()
     assert not workflow.STATE_ROOT.exists()
 
 
@@ -197,7 +196,6 @@ def test_plain_commands_have_zero_orchestrator_calls(monkeypatch, isolated, case
 @pytest.mark.parametrize("case", ["create", "reuse", "cancel", "preflight-fail", "setup-fail", "handoff-fail"])
 def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolated, surface, case):
     c = isolated
-    matching = orca if surface == "orca" else herdr
     opposite = herdr if surface == "orca" else orca
     guards = _guards(monkeypatch, opposite)
     monkeypatch.setattr(workflow, "manual_invocation", Mock(return_value=True))
@@ -206,10 +204,6 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
     monkeypatch.setattr(cli.confirm, "ask", Mock(return_value=case != "cancel"))
     ready = {"worktreePath": str(c.checkout), "agentIdentity": "pi", "connected": True,
              "writable": True, "orphaned": False, "incarnationId": "incarnation", "handle": "terminal"}
-    herdr_ready = {"workspace_id": "workspace", "agent": "pi", "launch_pending": False,
-                   "interactive_ready": True, "pane_id": "pane", "terminal_id": "terminal",
-                   "agent_session": {"source": "herdr:pi", "agent": "pi", "value": "session"},
-                   "cwd": str(c.checkout), "foreground_cwd": str(c.checkout)}
     pi_live = case == "reuse"
     if surface == "orca" and pi_live:
         orca.STATE_ROOT.mkdir()
@@ -217,11 +211,7 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
 
     def run(args, *, cwd, **_kwargs):
         assert cwd in {c.root, c.checkout}
-        if args == ["/fake/herdr", "session", "list", "--json"]:
-            assert surface == "herdr"
-            payload = {"sessions": [{"name": "default", "default": True, "running": True,
-                                     "socket_path": "/tmp/test-only-default.sock"}]}
-        elif args == ["wt", "-C", str(c.root), "config", "show", "--format", "json"]:
+        if args == ["wt", "-C", str(c.root), "config", "show", "--format", "json"]:
             payload = {"user": {"config": {}}}
         elif "hook" in args and "show" in args:
             payload = [{"name": "failing-setup"}] if case == "setup-fail" else []
@@ -255,26 +245,19 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
         return {"focus": {"handle": "terminal", "navigated": True, "tabId": "tab",
                           "worktreeId": f"repo::{c.checkout}"}}
 
-    def herdr_call(args, *, cwd, **_kwargs):
-        assert cwd in {c.root, c.checkout}
-        if args == ["workspace", "list"]:
+    def herdr_call(args, *, cwd, timeout):
+        if args == ["check", "--repo", str(c.root)]:
+            assert cwd == c.root
+            assert timeout == 10
             if case == "preflight-fail":
                 raise workflow.HandoffError("preflight failed")
-            return {"workspaces": []}
+            return "Ready"
+        assert args == ["open", "--repo", str(c.root), "--path", str(c.checkout)]
+        assert cwd == c.checkout
+        assert timeout == 90
         if case == "handoff-fail":
             raise workflow.HandoffError("handoff failed")
-        if args[:2] == ["worktree", "open"]:
-            return {"workspace": {"workspace_id": "workspace", "worktree": {
-                "checkout_path": str(c.checkout), "repo_root": str(c.root)}},
-                "root_pane": {"workspace_id": "workspace", "pane_id": "pane", "terminal_id": "terminal"}}
-        if args == ["agent", "list"]:
-            return {"agents": [herdr_ready] if pi_live else []}
-        if args[:2] == ["pane", "process-info"]:
-            return {"process_info": {"pane_id": "pane", "shell_pid": 1, "foreground_processes": [{"pid": 1}]}}
-        if args[:2] == ["agent", "start"]:
-            return {"agent": herdr_ready}
-        assert args == ["agent", "focus", "pane"]
-        return {"agent": {**herdr_ready, "focused": True}}
+        return f"{'Reused' if case == 'reuse' else 'Started'} Pi in Herdr"
 
     transport = Mock(side_effect=orca_call if surface == "orca" else herdr_call)
     if surface == "orca":
@@ -289,7 +272,9 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
     _assert_unused([*guards, *c.mutations])
     wt.run.assert_not_called()
     assert result.exit_code == (0 if case in {"create", "reuse"} else 1), result.output
-    assert not opposite.STATE_ROOT.exists()
+    assert not (c.root.parent / "herdr-state").exists()
+    if surface == "herdr":
+        assert not orca.STATE_ROOT.exists()
     if case == "cancel":
         transport.assert_not_called()
         run_mock.assert_not_called()
@@ -305,7 +290,8 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
         c.cd.assert_called_once_with(c.checkout)
     if case in {"create", "reuse"}:
         assert f"{'Started' if case == 'create' else 'Reused'} Pi" in result.output
-        assert matching.STATE_ROOT.exists()
+        if surface == "orca":
+            assert orca.STATE_ROOT.exists()
     elif case in {"setup-fail", "handoff-fail"}:
         assert f"Retry: cop {surface}" in result.output
         message = "A wt setup hook failed" if case == "setup-fail" else "handoff failed"
@@ -328,7 +314,7 @@ def test_shared_prepare_contacts_neither_orchestrator(monkeypatch, isolated):
                                 cwd=isolated.root)
     _assert_unused([*guards, gate])
     assert not orca.STATE_ROOT.exists()
-    assert not herdr.STATE_ROOT.exists()
+    assert not (isolated.root.parent / "herdr-state").exists()
     assert not workflow.STATE_ROOT.exists()
 
 
