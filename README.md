@@ -62,27 +62,33 @@ Full reference, prompt behavior, and safety rails:
 [docs/commands.md](docs/commands.md). A full terminal session:
 [docs/demo.md](docs/demo.md).
 
+## Worktree listing
+
+`cop list` groups worktrees by repo. Wide terminals show tables. Narrow terminals show full labeled cards, with the same fields rather than dropped columns or combined status cells.
+
+Each shown repo includes its main worktree as a row. `Main` means the original worktree from `git init` or `git clone`, not the default branch. `Linked` means an additional worktree. Branch and HEAD state are separate. Detached HEAD shows Branch `N/A` and HEAD state `Detached`. Current, Prunable, and Path mismatch also have separate fields. Repos with only a main worktree are hidden in the multi-repo view unless you pass `--all`. An explicit repo path shows its main worktree.
+
+The display separates staged, unstaged, untracked, and unmerged path counts. It also separates directory creation, HEAD commit time, latest local file change, parked time, and follow-up. Missing time evidence shows `Unknown`, without a fallback to another time. Times use ISO format with the local UTC offset. `cop list -v` shows full paths and wraps them when needed. `--size/--no-size` keeps the existing disk-usage behavior.
+
+Ahead, Behind, and HEAD contained use a named local ref, `refs/heads/<cached default name>`. The name comes from Worktrunk's cached default, with cached `origin/HEAD` as a fallback. It never comes from the main worktree's checked-out branch. Missing refs or shallow history show `Unknown`. Worktrunk's reported relation, content integration, integration method, predicted conflicts, and comparison target stay separate. Schema 1 does not name its exact target ref, so the target shows `Unknown`. Predicted conflicts needs explicit evidence for `Yes`; other compared states do not imply `No`. Those results do not prove local HEAD ancestry or permission to remove a checkout.
+
+Tracking remote, Tracking branch, Tracking ahead, and Tracking behind display Worktrunk's existing cached tracking data. They add no collection or network calls. The upstream can be a feature branch, not the remote default. Cached tracking counts are not fresh remote evidence.
+
+Run `cop list --explain` for a concise field glossary without a Git, `gh`, or `wt` scan. See [the glossary](docs/glossary.md) and [the full list reference](docs/commands.md#list-layout-and-local-fields). JSON fields and collection, cleanup, and the `cop new` preview stay unchanged.
+
 ## PR visibility
 
-`cop list` shows a `PR` column for each listed worktree branch, even after its Orca tab closes. It checks PRs in the GitHub repo named by `origin` each time you run the command.
+`cop list` shows PR lookup, PR state, PR number, and Additional PRs as separate fields. PR lookup does not depend on an open Orca tab. Collected branch rows use the GitHub repo named by `origin`.
 
-| PR cell | Meaning |
-|---|---|
-| `Draft #123` | An open draft PR matches this repo and branch. |
-| `Open #123` | An open PR is ready for review. |
-| `Merged #123` | The PR was merged. |
-| `Closed #123` | The PR was closed without merging. |
-| `No PR` | A complete lookup found no matching PR. |
-| `Unknown` | The lookup failed, timed out, or `gh` could not run. |
-| `N/A` | No supported GitHub origin exists, or the worktree has no branch. |
+Lookup distinguishes `Complete`, `Unknown`, `N/A`, and `Not checked`. `Complete` with PR state `None` means no PR matches. State identifies the selected PR as Draft, Open, Merged, or Closed. Main display rows do not promise PR checks; a row without collected evidence shows `Not checked`.
 
-Open and draft PRs take priority. Otherwise, the most recently updated closed or merged PR appears. `+N` means other PRs also match. Run `cop list --pr-detail` to see all matching PRs and URLs. A match uses the branch name and repo, so a deleted and reused branch can match an older PR.
+Open and draft PRs take priority. Otherwise, the most recently updated closed or merged PR appears. Additional PRs counts other matches for the same repo and branch. Run `cop list --pr-detail` to see all matching PRs with full URLs. A match uses the branch name and repo, so a deleted and reused branch can match an older PR.
 
 Use `cop link-pr PATH` to attach the displayed PR to an existing Orca workspace. It refuses an ambiguous workspace and does not create one. Use `cop list --no-pr` to skip the lookup. `cop list --json` stays unchanged and does not check PRs. Lookups use complete pagination and bounded concurrent calls, without a cache. Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
 
 ## Remote default
 
-`cop list` also shows whether each worktree's committed HEAD reached the fresh `origin` default branch. The repo heading names the target, such as `origin/main`.
+`cop list` also shows whether a checked worktree's current committed HEAD reached the fresh actual `origin` default branch. The repo metadata names the remote and default branch separately, with the observed remote commit and check time. Including the main worktree as a display row does not promise a remote check; uncollected rows show `Not checked`.
 
 | Remote default cell | Meaning |
 |---|---|
@@ -90,10 +96,11 @@ Use `cop link-pr PATH` to attach the displayed PR to an existing Orca workspace.
 | `Pending` | Complete ancestry and commit-associated PR checks found no integration into that target. |
 | `Unknown` | Evidence is unavailable, incomplete, or the checkout changed during the check. |
 | `N/A` | No supported GitHub origin or active branch can be checked. |
+| `Not checked` | No remote-default result was collected for this row. |
 
 The check supports direct integration and PR merges, including squash merges with an exact original head and a reachable merge commit. A renamed branch can still match through commit identity. Newer commits do not inherit an older PR's merge result. A local-only commit that GitHub cannot compare shows `Unknown`, not `Pending`.
 
-`Reached` describes committed HEAD, not dirty edits, live deployment, or removal permission. Local `Merge` and PR history stay separate. Use `--no-remote-default` to skip this check. Use `--no-pr --no-remote-default` for a listing without GitHub checks. JSON remains unchanged and performs neither lookup. Checks do not fetch or change Git refs.
+`Reached` describes committed HEAD, not dirty edits, live deployment, or removal permission. Local ancestry, Worktrunk content integration and predicted conflicts, and branch-name PR history stay separate. Use `--no-remote-default` to skip this check. Use `--no-pr --no-remote-default` for a listing without GitHub checks. JSON remains unchanged and performs neither lookup. Checks do not fetch or change Git refs. The display adds no new family of network calls.
 
 ## Pi in Orca or Herdr
 
@@ -133,35 +140,20 @@ Opening Orca's verified Pi terminal binds its terminal state. Hide sleeping keep
 
 ### Vocabulary
 
-Defined once, used everywhere:
+[docs/glossary.md](docs/glossary.md) defines the terms and field meanings, with [Git's official worktree terms](https://git-scm.com/docs/git-worktree). Git facts, Coppice task state, and Worktrunk comparison results are separate.
 
-- **Repo**: the `.git` database, every commit and branch, plus by
-  convention the whole project around it. `coppice` works across every
-  repo on disk, not just the one you're standing in.
-- **Project**: the codebase as one unit: its repo plus every worktree
-  attached to it. Named by the repo's main directory basename.
-- **Branch**: a ref, a named pointer to a commit. It lives in the repo
-  and has no location on disk.
-- **Worktree**: one working directory attached to a repo, checked out to
-  one branch, sharing the same `.git` history as every other worktree.
-  The **main worktree** is the original checkout and holds the real
-  `.git` directory; every **linked worktree** (everything `cop` creates)
-  holds a small `.git` file pointing back to it.
-- **Checkout**: the association between one worktree and one branch. Git
-  enforces: one branch in at most one worktree at a time.
-- **Path**: a worktree's directory on disk. A worktree's identity is its
-  path: pi sessions, editor windows, and terminals attach to it, not to
-  the branch.
-- **Expected path**: the path `wt`'s template derives for a branch,
-  `~/worktrees/<owner>/<branch-slug>/<project>`. `wt` always wants a
-  branch's worktree there.
-- **Registry**: the shared list of repos `coppice`/`wt` have seen
-  (`~/.cache/wt/known-repos`), letting commands operate across every
-  repo you've touched. **Scope**: which repos a command operates over:
-  an explicit path scopes to one; omitting it defaults to the whole
-  registry.
-- **Current worktree**: whichever one you're standing in; its branch
-  shows in bold green in `cop list`.
+- **Repo**: the Git database, its commits and refs, and the project around it.
+- **Project**: the repo and every attached worktree, named by the main directory's basename.
+- **Branch**: a named ref pointing to a commit. It has no location on disk.
+- **Worktree**: a checkout with its own files, index, and HEAD, sharing the repo's history. It can use a branch or detached HEAD.
+- **Main worktree**: the original worktree made by `git init` or `git clone`. It need not use the default branch.
+- **Linked worktree**: an additional worktree made by `git worktree add`, including through `wt`.
+- **Checkout**: the branch or detached commit used by a worktree. Git normally permits a branch in only one worktree at a time.
+- **Path**: a worktree's directory. Pi sessions, editor windows, and terminals attach to it, not to the branch.
+- **Expected path**: the path Worktrunk's template assigns to a branch, such as `~/worktrees/<owner>/<branch-slug>/<project>`.
+- **Registry**: the shared known-repo list at `~/.cache/wt/known-repos`, separate from Git's worktree registrations.
+- **Scope**: the repos a command uses. An explicit path selects one repo. Without it, `list` uses known repos and the current repo.
+- **Current worktree**: the worktree containing your working directory. The display labels it separately from Type and Branch.
 
 ![Diagram: a worktree has two identities, the directory on disk (dir_name) that tools attach to, and the git branch (branch_name) that git and cop commands act on; a hand git switch can desynchronize the two](docs/diagrams/worktree-dir-vs-branch.drawio.svg)
 
@@ -179,22 +171,18 @@ exactly one of three operations:
 | **relocate** | a worktree's path | path-keyed tools | `cop relocate` |
 | **rename** | the branch ref | nothing on disk | `git branch -m` (coppice never does this) |
 
-A mismatch, a worktree sitting at another branch's expected path, shows
-in `cop list` as `<checked-out-branch> @ <that-branch>/`. How `cop new`
-recovers when it needs that path: [docs/recovery.md](docs/recovery.md).
-How `cop relocate` heals a mismatch afterwards:
-[docs/worktrees.md](docs/worktrees.md).
+A worktree at a path that does not match its checked-out branch shows a separate Path mismatch field in `cop list`. The Branch field still names the actual branch. How `cop new` recovers when it needs that path: [docs/recovery.md](docs/recovery.md). How `cop relocate` heals a mismatch afterwards: [docs/worktrees.md](docs/worktrees.md).
 
 ### States
 
 | State | Meaning | Consequence |
 |---|---|---|
 | **dirty** | uncommitted changes | `clean` skips; `remove` refuses without `--force` |
-| **merged** | branch merged into the default branch | removable via `clean --merged` |
+| **legacy merged bucket** | Coppice's grouping of Worktrunk comparison states, not strict Git ancestry | used by the unchanged `clean --merged` filter; not removal permission |
 | **stale** | directory gone, git record remains | `clean` always sweeps |
 | **parked** | task complete, kept for follow-up | `sync` skips; `remove`/`clean` refuse until `cop unpark` |
 
-Details and the Merge column buckets: [docs/states.md](docs/states.md).
+Separate Git facts, task state, and integration evidence: [docs/states.md](docs/states.md).
 How `cop sync` keeps worktrees current: [docs/sync.md](docs/sync.md).
 
 ## Documentation
@@ -204,7 +192,8 @@ How `cop sync` keeps worktrees current: [docs/sync.md](docs/sync.md).
 | [docs/why-worktrees.md](docs/why-worktrees.md) | the value proposition in depth, with diagrams |
 | [docs/ecosystem.md](docs/ecosystem.md) | `wt`, understory, canopy, the shared registry |
 | [docs/worktrees.md](docs/worktrees.md) | how worktrees share one `.git`; what `cop relocate` moves |
-| [docs/states.md](docs/states.md) | dirty, merged, stale, parked |
+| [docs/glossary.md](docs/glossary.md) | Git, Coppice, and Worktrunk terms and list fields |
+| [docs/states.md](docs/states.md) | dirty, stale, parked, and integration evidence |
 | [docs/sync.md](docs/sync.md) | `cop sync` semantics |
 | [docs/recovery.md](docs/recovery.md) | occupied-path recovery flow |
 | [docs/commands.md](docs/commands.md) | full command reference, prompts, registry, shell integration |

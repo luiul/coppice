@@ -2,6 +2,7 @@
 
 import copy
 import json
+import re
 import threading
 from pathlib import Path
 from unittest.mock import Mock
@@ -44,6 +45,8 @@ def listing(tmp_path, monkeypatch):
     monkeypatch.setattr(wt, "list_worktrees_many", lambda roots: {root: entries})
     monkeypatch.setattr(cli.park_mod, "parked_at_many", lambda roots: {})
     monkeypatch.setattr(cli, "_collect_remote_defaults", lambda entries: {})
+    monkeypatch.setattr(cli.list_facts, "collect_many", Mock(return_value={}))
+    monkeypatch.setattr(cli.list_facts, "revalidate_many", Mock(side_effect=lambda entries, facts: facts))
     lookup = Mock(
         return_value=gh.PullRequestLookup(
             "ok",
@@ -62,23 +65,56 @@ def test_list_default_pr_column(listing, width):
     before = copy.deepcopy(entries)
     result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": str(width)})
     assert result.exit_code == 0, result.output
-    assert "PR" in result.stdout
-    assert "Open #123" in result.stdout
-    assert "No PR" in result.stdout
+    assert all(label in result.stdout for label in ("PR lookup", "PR state", "PR number", "Additional PRs"))
+    assert "Complete" in result.stdout
+    if width == 80:
+        feature = result.stdout.split("Branch: feature", 1)[1].split("Branch: waiting", 1)[0]
+        waiting = result.stdout.split("Branch: waiting", 1)[1]
+        assert "PR lookup: Complete" in feature
+        assert "PR state: Open" in feature
+        assert "PR number: 123" in feature
+        assert "Additional PRs: 0" in feature
+        assert "PR lookup: Complete" in waiting
+        assert "PR state: None" in waiting
+        assert "PR number: N/A" in waiting
+    assert re.search(r"\bOpen\b", result.stdout)
+    assert re.search(r"\b123\b", result.stdout)
+    assert re.search(r"\bNone\b", result.stdout)
+    assert "Open #123" not in result.stdout
     assert "feature" in result.stdout
     assert result.stderr == ""
     lookup.assert_called_once_with(root, {"feature", "waiting"})
     assert entries == before
 
 
+def test_list_pr_number_is_clickable_without_combined_cell(listing, monkeypatch):
+    monkeypatch.setattr(cli, "console", Console(width=80, force_terminal=True, legacy_windows=False, highlight=False))
+    result = runner.invoke(cli.app, ["list", "--no-size"], color=True)
+
+    assert result.exit_code == 0, result.output
+    assert "https://github.com/owner/repo/pull/123" in result.stdout
+    assert "\x1b]8;" in result.stdout
+    plain = re.sub(r"\x1b\]8;[^\x1b]*\x1b\\", "", result.stdout)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", plain)
+    assert "PR state: Open" in plain
+    assert "PR number: 123" in plain
+    assert "Additional PRs: 0" in plain
+    assert "Open #123" not in plain
+
+
 @pytest.mark.parametrize("status,label", [("unknown", "Unknown"), ("unsupported", "N/A")])
 def test_list_lookup_outcomes(listing, status, label):
     root, _, lookup = listing
     lookup.return_value = gh.PullRequestLookup(status, reason="gh not installed" if status == "unknown" else None)
-    result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "160"})
+    result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "80"})
     assert result.exit_code == 0, result.output
-    assert label in result.stdout
-    assert "No PR" not in result.stdout
+    feature = result.stdout.split("Branch: feature", 1)[1].split("Branch: waiting", 1)[0]
+    assert f"PR lookup: {label}" in feature
+    assert f"PR state: {label}" in feature
+    assert f"PR number: {label}" in feature
+    assert f"Additional PRs: {label}" in feature
+    assert "Complete" not in result.stdout
+    assert not re.search(r"PR state:\s+None\b", result.stdout)
     if status == "unknown":
         assert f"PR lookup unavailable for {root.name}" in result.stderr
         assert "gh not installed" in result.stderr
@@ -103,6 +139,8 @@ def test_json_has_no_pr_lookup_or_new_fields(listing, flags):
     assert data == [{**entry, "repo": "repo", "last_modified": 1.0} for entry in entries]
     assert result.stderr == ""
     lookup.assert_not_called()
+    cli.list_facts.collect_many.assert_not_called()
+    cli.list_facts.revalidate_many.assert_not_called()
 
 
 def test_verbose_and_size_columns_align(listing, monkeypatch):
@@ -110,8 +148,13 @@ def test_verbose_and_size_columns_align(listing, monkeypatch):
     monkeypatch.setattr(cli.sizes, "dir_sizes_kb", lambda paths, **kwargs: {Path(w["path"]): 10 for w in entries})
     result = runner.invoke(cli.app, ["list", "--verbose"], env={"COLUMNS": "200"})
     assert result.exit_code == 0, result.output
-    assert all(header in result.stdout for header in ["Size", "Path", "Merge", "PR"])
-    assert "Open #123" in result.stdout
+    assert all(
+        header in result.stdout for header in ("Disk usage", "Path", "Reported relation", "PR state", "PR number")
+    )
+    assert re.search(r"\bOpen\b", result.stdout)
+    assert re.search(r"\b123\b", result.stdout)
+    assert re.search(r"\bAhead\b", result.stdout)
+    assert "10K" in result.stdout
 
 
 def test_stale_branch_still_has_pr_and_detached_is_not_queried(listing):
@@ -120,9 +163,11 @@ def test_stale_branch_still_has_pr_and_detached_is_not_queried(listing):
     entries[2]["branch"] = None
     result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "160"})
     assert result.exit_code == 0, result.output
-    assert "Open #123" in result.stdout
+    assert re.search(r"\bOpen\b", result.stdout)
+    assert re.search(r"\b123\b", result.stdout)
     assert "N/A" in result.stdout
-    assert "stale" in result.stdout
+    assert "Prunable" in result.stdout
+    assert re.search(r"\bYes\b", result.stdout)
     lookup.assert_called_once_with(root, {"feature"})
 
 
@@ -131,8 +176,11 @@ def test_empty_and_main_only_repos_skip_lookup(listing):
     entries[:] = entries[:1]
     result = runner.invoke(cli.app, ["list", "--all", "--no-size"])
     assert result.exit_code == 0, result.output
-    assert "no extra worktrees" in result.stdout
-    assert "PR" not in result.stdout
+    assert "Worktree type: Main" in result.stdout
+    assert "PR lookup: Not checked" in result.stdout
+    assert "PR state: Not checked" in result.stdout
+    assert "Main worktrees: 1" in result.stdout
+    assert "Linked worktrees: 0" in result.stdout
     lookup.assert_not_called()
     entries.clear()
     result = runner.invoke(cli.app, ["list", "--no-size"])
@@ -161,8 +209,12 @@ def test_repo_scoped_matching_and_empty_section_alignment(listing, monkeypatch):
     )
     result = runner.invoke(cli.app, ["list", "--no-size", "--all"], env={"COLUMNS": "160"})
     assert result.exit_code == 0, result.output
-    assert "Open #123" in result.stdout and "Open #456" in result.stdout
-    assert "no extra worktrees" in result.stdout
+    assert re.search(r"\b123\b", result.stdout) and re.search(r"\b456\b", result.stdout)
+    assert result.stdout.count("Pull requests") == 3
+    assert "quiet" in result.stdout
+    assert "Not checked" in result.stdout
+    assert "Main worktrees: 3" in result.stdout
+    assert "Linked worktrees: 3" in result.stdout
     assert lookup.call_count == 2
     assert all(call.args[0] != quiet for call in lookup.call_args_list)
 
@@ -219,7 +271,11 @@ def test_pr_detail_includes_each_url_and_state(listing):
     )
     result = runner.invoke(cli.app, ["list", "--no-size", "--pr-detail"], env={"COLUMNS": "160"})
     assert result.exit_code == 0, result.output
-    assert "Draft #7 +1" in result.stdout
+    overview, _details = result.stdout.split("repo / feature:", 1)
+    assert "PR state" in overview and "Draft" in overview
+    assert "PR number" in overview and re.search(r"\b7\b", overview)
+    assert "Additional PRs" in overview and re.search(r"\b1\b", overview)
+    assert "Draft #7 +1" not in overview
     assert "repo / feature: Draft #7 https://github.com/owner/repo/pull/7" in result.stdout
     assert "repo / feature: Merged #6 https://github.com/owner/repo/pull/6" in result.stdout
 
@@ -291,14 +347,22 @@ def test_default_size_layout_multiple_long_pr_numbers(listing, monkeypatch, widt
     )
     result = runner.invoke(cli.app, ["list"], env={"COLUMNS": str(width)})
     assert result.exit_code == 0, result.output
-    assert "#1234567" in result.stdout
-    if count > 1:
-        assert f"+{count - 1}" in result.stdout
-    assert "No PR" in result.stdout
-    assert "clean" in result.stdout
-    assert "unmerged" in result.stdout
-    assert "feature" in result.stdout
-    assert "Size" in result.stdout
+    assert "PR number" in result.stdout
+    assert re.search(r"\b1234567\b", result.stdout)
+    assert "#1234567" not in result.stdout
+    assert "Additional PRs" in result.stdout
+    assert re.search(rf"\b{count - 1}\b", result.stdout)
+    assert f"+{count - 1}" not in result.stdout
+    if width == 80:
+        feature = result.stdout.split("Branch: feature/verify-open-pr-status", 1)[1].split("Branch: waiting", 1)[0]
+        assert f"Additional PRs: {count - 1}" in feature
+        assert "PR number: 1234567" in feature
+    assert re.search(r"\bNone\b", result.stdout)
+    assert "Staged paths" in result.stdout
+    assert "Unstaged paths" in result.stdout
+    assert "Reported relation" in result.stdout and "Ahead" in result.stdout
+    assert "feature/verify-open-pr-status" in result.stdout
+    assert "Disk usage" in result.stdout
 
 
 def test_link_pr_submits_primary_and_never_changes_orca_implicitly(tmp_path, monkeypatch):

@@ -38,7 +38,22 @@ from rich.text import Text
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
-from coppice import confirm, gh, git, herdr, orca, remote_default, repo, shell, sizes, vscode, workflow, wt
+from coppice import (
+    confirm,
+    gh,
+    git,
+    herdr,
+    list_facts,
+    list_view,
+    orca,
+    remote_default,
+    repo,
+    shell,
+    sizes,
+    vscode,
+    workflow,
+    wt,
+)
 from coppice import park as park_mod
 
 APP_HELP = """\
@@ -1363,7 +1378,7 @@ def cmd_list(
         typer.Option(
             "--verbose",
             "-v",
-            help="Add a Path column with each worktree's (and repo's) on-disk location.",
+            help="Show each full worktree path. Paths wrap instead of truncating.",
         ),
     ] = False,
     show_pr: Annotated[
@@ -1377,16 +1392,25 @@ def cmd_list(
             help="Check committed HEAD against fresh origin default history; --no-remote-default skips the check.",
         ),
     ] = True,
+    explain: Annotated[
+        bool,
+        typer.Option("--explain", help="Explain overview fields without scanning repositories or checking remotes."),
+    ] = False,
     pr_detail: Annotated[
         bool,
         typer.Option("--pr-detail", help="Show every matching PR and link after the table."),
     ] = False,
 ) -> None:
-    """List worktrees across every known repo, or just PATH.
+    """Show checkout, local changes, activity, integration, and PR facts separately.
 
-    Repos with no extra worktrees are hidden by default, they're the common
-    case and bury the repos that do have some. --all/-a shows them.
+    Main worktrees appear beside linked worktrees. Repositories without
+    linked worktrees are hidden across multiple repos unless --all is set.
     """
+    if explain:
+        if as_json or pr_detail:
+            raise _fail("--explain cannot be combined with --json or --pr-detail.")
+        list_view.explain(console)
+        return
     if pr_detail and (not show_pr or as_json):
         raise _fail("--pr-detail cannot be combined with --no-pr or --json.")
 
@@ -1420,6 +1444,21 @@ def cmd_list(
         print(json.dumps(merged))
         return
 
+    current_root: str | None = None
+    try:
+        caller = subprocess.run(
+            ["git", "-C", str(Path.cwd()), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            errors="surrogateescape",
+            timeout=5,
+            env=git.clean_git_environment(),
+        )
+        if caller.returncode == 0 and caller.stdout.strip():
+            current_root = str(Path(caller.stdout.strip()).resolve())
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
     # Fetch every repo's worktrees concurrently (one `wt` subprocess per
     # repo, overlapped rather than run one after another), then size them
     # all in one batch (with progress on the spinner) so that walk happens
@@ -1441,12 +1480,8 @@ def cmd_list(
             spinner.update("[dim]Checking remote default branches…[/dim]")
             remote_lookups = _collect_remote_defaults(worktrees_by_repo)
 
-        # The Modified column of every displayed (non-main) row, collected up
-        # front so rendering stays free of subprocesses.
-        spinner.update("[dim]Reading modification times…[/dim]")
-        dirty_mtimes = _collect_dirty_mtimes(
-            w for worktrees in worktrees_by_repo.values() for w in worktrees if not w.get("is_main")
-        )
+        spinner.update("[dim]Reading checkout and local change facts…[/dim]")
+        overview_facts = list_facts.collect_many(worktrees_by_repo)
 
         size_cache: dict[Path, int] | None = None
         if show_size:
@@ -1467,6 +1502,7 @@ def cmd_list(
                     lambda root: remote_default.revalidate(root, worktrees_by_repo[root], remote_lookups[root]), roots
                 )
                 remote_lookups = dict(zip(roots, refreshed, strict=True))
+        overview_facts = list_facts.revalidate_many(worktrees_by_repo, overview_facts)
         spinner.stop()
 
     for root, lookup in (pr_lookups or {}).items():
@@ -1477,64 +1513,33 @@ def cmd_list(
         if remote_lookup.reason:
             err.print(Text(f"Remote default unavailable for {root.name}: {remote_lookup.reason}.", style="dim"))
 
-    total, total_kb, total_stale, n_hidden = _render_list(
+    if current_root is not None:
+        current_root = next(
+            (
+                w["path"]
+                for rows in worktrees_by_repo.values()
+                for w in rows
+                if w.get("path") and str(Path(w["path"]).resolve()) == current_root
+            ),
+            current_root,
+        )
+
+    list_view.render(
+        console,
         repos,
         worktrees_by_repo,
+        overview_facts,
         show_size=show_size,
         size_cache=size_cache,
         show_all=show_all,
         verbose=verbose,
-        dirty_mtimes=dirty_mtimes,
         pr_lookups=pr_lookups,
         remote_lookups=remote_lookups,
+        current_path=current_root,
     )
 
     if pr_detail and pr_lookups:
         _print_pr_details(repos, worktrees_by_repo, pr_lookups)
-
-    if total == 0:
-        if n_hidden:
-            # Everything in scope is a repo with no extra worktrees, and
-            # the default view hides those, so say so instead of printing
-            # an empty table.
-            console.print(f"No worktrees across {_plural(len(repos), 'repo')}. Create one: [cyan]cop new PATH[/]")
-        console.print()
-        return
-
-    # State rollup across every listed worktree, so the closing line reads
-    # as an actionable summary ('3 merged' nudges towards 'cop clean
-    # --merged') rather than just a count.
-    n_merged = n_dirty = n_conflict = n_mismatch = 0
-    n_repos_with = 0
-    for repo_root in repos:
-        others = [w for w in worktrees_by_repo[repo_root] if not w.get("is_main")]
-        n_repos_with += 1 if others else 0
-        for w in others:
-            if _is_stale(w):
-                continue
-            n_dirty += 1 if _is_dirty(w) else 0
-            n_mismatch += 1 if _is_mismatch(w) else 0
-            bucket = _classify_main_state(w)
-            n_merged += 1 if bucket == "merged" else 0
-            n_conflict += 1 if bucket == "conflict" else 0
-
-    console.print()
-    summary = f"{_plural(total, 'worktree')} in {_plural(n_repos_with, 'repo')}"
-    if show_size and total_kb:
-        summary += f" \u00b7 {sizes.human_kb(total_kb)} on disk"
-    if n_merged:
-        summary += f" \u00b7 [{_STYLE_MERGED}]{n_merged} merged[/] [dim](cop clean --merged)[/]"
-    if n_dirty:
-        summary += f" \u00b7 [{_STYLE_DIRTY}]{n_dirty} dirty[/]"
-    if n_conflict:
-        summary += f" \u00b7 [{_STYLE_CONFLICT}]{_plural(n_conflict, 'conflict')}[/]"
-    if n_mismatch:
-        summary += f" \u00b7 [{_STYLE_MISMATCH}]{n_mismatch} mismatched[/] [dim](cop relocate)[/]"
-    console.print(summary + ".")
-    if total_stale:
-        console.print(f"[red]{total_stale} stale (dangling) reference(s)[/], run 'cop clean' to remove.")
-    if n_hidden:
-        console.print(f"[dim]{_plural(n_hidden, 'more repo')} with no extra worktrees (show with: cop list --all)[/]")
     console.print()
 
 

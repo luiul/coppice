@@ -9,13 +9,16 @@ fake `wt.list_worktrees`/`gh.open_prs` results rather than a real `wt`/`gh`
 install, so these pass in CI the same as locally.
 """
 
+import datetime as dt
 import os
 import re
 import subprocess
 from pathlib import Path
 from typing import Any
+from unittest.mock import Mock
 
 import pytest
+from rich.console import Console
 from typer.testing import CliRunner
 
 from coppice import cli, gh, git, park, repo, shell, vscode, wt
@@ -35,6 +38,8 @@ def _isolate_cli_tests(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(vscode, "_run_osascript", lambda _script: None)
     monkeypatch.setattr(cli, "_collect_remote_defaults", lambda entries: {})
+    monkeypatch.setattr(cli.list_facts, "collect_many", Mock(return_value={}))
+    monkeypatch.setattr(cli.list_facts, "revalidate_many", Mock(side_effect=lambda entries, facts: facts))
     monkeypatch.delenv(shell.CD_FILE_ENV_VAR, raising=False)
 
 
@@ -902,12 +907,7 @@ def test_list_without_wt_fails_clearly(tmp_path, monkeypatch):
 
 
 def test_list_flags_stale_worktrees(tmp_path, monkeypatch):
-    """A prunable (dangling) worktree reference must stand out in `list`,
-    not blend in as if it were just another clean, healthy worktree: its
-    'Working tree' cell should read '-' (there's no directory left to be
-    clean or dirty), and the run's summary should call out the stale count
-    by name so it's obvious 'coppice clean' has something to do.
-    """
+    """Prunable registration is a separate fact, not a cleanup suggestion."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [
@@ -919,23 +919,20 @@ def test_list_flags_stale_worktrees(tmp_path, monkeypatch):
     result = runner.invoke(app, ["list", str(repo_dir), "--no-size"])
 
     assert result.exit_code == 0, result.output
-    assert "stale-branch" in result.output
-    assert "stale" in result.output
-    flat_output = result.output.replace("\n", "")
-    assert "1 stale (dangling) reference(s)" in flat_output
-    assert "remove" in flat_output
-    # no misleading 'clean' working-tree label for a gone directory (the
-    # only legitimate mention of 'clean' on the page is the "run 'coppice
-    # clean'" tip)
-    assert "clean" not in flat_output.replace("copclean", "").replace("cop clean", "")
+    assert "Branch: stale-branch" in result.output
+    stale = result.output.split("Branch: stale-branch", 1)[1]
+    assert "Prunable: Yes" in stale
+    assert "Staged paths: N/A" in stale
+    assert "Unmerged paths: N/A" in stale
+    assert "Main worktrees: 1" in result.output
+    assert "Linked worktrees: 1" in result.output
+    assert "cop clean" not in result.output
+    assert "cop remove" not in result.output
+    assert "dangling reference(s)" not in result.output
 
 
 def test_list_flags_branch_path_mismatch(tmp_path, monkeypatch):
-    """A worktree sitting at another branch's path (created for that
-    branch, later `git switch`ed by hand) is keyed by its checked-out
-    branch, so the path's own branch looks like it has no worktree at all.
-    The row must name the path's branch segment, or there is no way to see
-    where that branch's worktree path went."""
+    """Path mismatch is explicit. Verbose mode preserves the whole path."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [
@@ -945,20 +942,18 @@ def test_list_flags_branch_path_mismatch(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "160"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size", "--verbose"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
-    flat = result.output.replace("\n", "")
-    assert "feature/other" in flat
-    assert "@ review-jamie/" in flat
-    # a worktree at its expected path gets no such flag
-    assert "@ plain/" not in flat
+    mismatch = result.output.split("Branch: feature/other", 1)[1].split("Branch: plain", 1)[0]
+    assert "Path mismatch: Yes" in mismatch
+    assert str(tmp_path / "review-jamie" / "repo") in result.output.replace("\n", "")
+    assert "Path mismatch: No" in result.output.split("Branch: plain", 1)[1]
+    assert "@ review-jamie/" not in result.output
 
 
-def test_list_summary_nudges_mismatches_at_relocate(tmp_path, monkeypatch):
-    """A mismatch row's '@ dir/' flag says WHERE the worktree sits; the
-    closing summary must complete the thought with WHAT to run about it,
-    the same way the merged count nudges towards 'cop clean --merged'."""
+def test_list_summary_has_no_cleanup_or_relocation_hints(tmp_path, monkeypatch):
+    """The overview reports facts without recommending destructive actions."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [
@@ -971,8 +966,12 @@ def test_list_summary_nudges_mismatches_at_relocate(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     flat = result.output.replace("\n", "")
-    assert "1 mismatched" in flat
-    assert "cop relocate" in flat
+    assert "Path mismatch" in flat
+    assert "Main worktrees: 1" in flat
+    assert "Linked worktrees: 1" in flat
+    assert "cop relocate" not in flat
+    assert "cop clean" not in flat
+    assert "cop remove" not in flat
 
 
 def _stub_relocate_scope(monkeypatch, repo_dir, entries, targets_by_branch):
@@ -1141,16 +1140,20 @@ def test_list_hides_repos_without_extra_worktrees_by_default(tmp_path, monkeypat
     assert "busy" in result.output
     assert "feature" in result.output
     assert "quiet" not in result.output
-    assert "1 more repo with no extra worktrees" in result.output
+    assert "Hidden repositories without linked worktrees: 1" in result.output
+    assert "Main worktrees: 1" in result.output
+    assert "Linked worktrees: 1" in result.output
     assert "--all" in result.output
 
     result_all = runner.invoke(app, ["list", "--no-size", "--all"], env={"COLUMNS": "160"})
     assert result_all.exit_code == 0, result_all.output
     assert "quiet" in result_all.output
-    assert "no extra worktrees" in result_all.output
+    assert "Main worktrees: 2" in result_all.output
+    assert "Linked worktrees: 1" in result_all.output
+    assert "Hidden repositories without linked worktrees" not in result_all.output
 
 
-def test_list_summary_pluralizes_singular(tmp_path, monkeypatch):
+def test_list_summary_counts_main_and_linked_separately(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     entries = [_entry("main", repo_dir, is_main=True), _entry("feature", tmp_path / "feature")]
@@ -1159,13 +1162,13 @@ def test_list_summary_pluralizes_singular(tmp_path, monkeypatch):
     result = runner.invoke(app, ["list", str(repo_dir), "--no-size"])
 
     assert result.exit_code == 0, result.output
-    assert "1 worktree in 1 repo." in result.output
-    assert "worktree(s)" not in result.output
+    assert "Main worktrees: 1" in result.output
+    assert "Linked worktrees: 1" in result.output
+    assert "1 worktree in 1 repo." not in result.output
 
 
 def test_list_empty_state_when_no_worktrees_anywhere(tmp_path, monkeypatch):
-    """Nothing anywhere (and repos hidden by default) should read as a
-    friendly empty state, not an empty table."""
+    """Several main-only repos remain hidden, but summary counts are explicit."""
     repo_a = _init_repo(tmp_path / "repo-a")
     repo_b = _init_repo(tmp_path / "repo-b")
     _stub_wt(monkeypatch)
@@ -1175,78 +1178,215 @@ def test_list_empty_state_when_no_worktrees_anywhere(tmp_path, monkeypatch):
     result = runner.invoke(app, ["list", "--no-size"])
 
     assert result.exit_code == 0, result.output
-    assert "No worktrees across 2 repos." in result.output
-    assert "cop new" in result.output
+    assert "Main worktrees: 0" in result.output
+    assert "Linked worktrees: 0" in result.output
+    assert "Hidden repositories without linked worktrees: 2" in result.output
+    assert "--all" in result.output
+    assert "cop new" not in result.output
+    assert "repo-a" not in result.output and "repo-b" not in result.output
 
 
 def test_list_verbose_shows_paths(tmp_path, monkeypatch):
-    """--verbose answers 'where is it': a Path column per worktree, and the
-    repo's own path back in the section heading."""
+    """Verbose paths are full paths, never the legacy truncated form."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
-    entries = [_entry("main", repo_dir, is_main=True), _entry("feature", tmp_path / "feature")]
+    entries = [
+        _entry("main", repo_dir, is_main=True),
+        _entry("feature", tmp_path / ("long-checkout-name-" * 4) / "distinct-tail"),
+    ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size", "--verbose"], env={"COLUMNS": "200"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size", "--verbose"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
     assert "Path" in result.output
-    flat_output = result.output.replace("\n", "")
-    assert cli._short_path(tmp_path / "feature", max_len=40) in flat_output
-    assert cli._short_path(repo_dir, max_len=40) in flat_output
+    flat_output = "".join(result.output.split())
+    assert entries[1]["path"] in flat_output
+    assert str(repo_dir) in flat_output
+    assert "distinct-tail" in result.output
+    assert "…" not in flat_output
 
 
-def test_list_modified_column_reads_the_commit_age_for_clean_worktrees(tmp_path, monkeypatch):
-    """A clean worktree's last modification is its last commit: the
-    Modified column must show the commit's age, and it must never cost a
-    git status subprocess (clean is the common case, see
-    `_last_modified_ts`)."""
+def _local_time(timestamp: float) -> str:
+    return dt.datetime.fromtimestamp(timestamp, dt.UTC).astimezone().isoformat(sep=" ", timespec="minutes")
+
+
+def _stub_list_facts(monkeypatch, root: Path, entries: list[dict], **overrides):
+    """Supply prepared facts without scanning synthetic checkout directories."""
+    rows = {
+        entry["path"]: cli.list_facts.WorktreeFacts(
+            path=entry["path"],
+            branch=entry.get("branch"),
+            detached=entry.get("branch") is None,
+            identity_verified=True,
+            commit_time=entry.get("commit", {}).get("timestamp"),
+            **overrides.get(entry["path"], {}),
+        )
+        for entry in entries
+    }
+    facts = {root: cli.list_facts.RepoFacts(rows=rows)}
+    collect = Mock(return_value=facts)
+    monkeypatch.setattr(cli.list_facts, "collect_many", collect)
+    return collect, facts
+
+
+def test_list_uncollected_local_facts_are_unknown(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    entries = [_entry("main", root, is_main=True), _entry("feature", tmp_path / "feature", dirty=True)]
+    monkeypatch.setattr(cli, "console", Console(width=80, highlight=False))
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [root])
+    monkeypatch.setattr(wt, "require_wt", lambda: None)
+    monkeypatch.setattr(wt, "list_worktrees_many", lambda _roots: {root: entries})
+
+    result = runner.invoke(app, ["list", "--no-size", "--no-pr", "--no-remote-default"])
+
+    assert result.exit_code == 0, result.output
+    feature = result.output.split("Branch: feature", 1)[1]
+    for label in (
+        "Staged paths",
+        "Unstaged paths",
+        "Untracked paths",
+        "Unmerged paths",
+        "Commits ahead",
+        "Commits behind",
+        "HEAD contained",
+        "Directory created",
+        "HEAD committed",
+        "Local file changed",
+    ):
+        assert f"{label}: Unknown" in feature
+    assert "Git operation: None reported" in feature
+    assert "Disk usage" not in result.output
+    assert "PR lookup" not in result.output
+    assert "HEAD integration" not in result.output
+
+
+@pytest.mark.parametrize("scope", [[], ["--all"], ["explicit"]])
+def test_list_main_only_checkout_has_a_row(tmp_path, monkeypatch, scope):
+    root = tmp_path / "repo"
+    entries = [_entry("topic-not-default", root, is_main=True)]
+    monkeypatch.setattr(cli, "console", Console(width=80, highlight=False))
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [root])
+    monkeypatch.setattr(wt, "require_wt", lambda: None)
+    monkeypatch.setattr(wt, "list_worktrees_many", lambda _roots: {root: entries})
+    args = [str(root)] if scope == ["explicit"] else scope
+
+    result = runner.invoke(app, ["list", *args, "--no-size", "--no-pr", "--no-remote-default"])
+
+    assert result.exit_code == 0, result.output
+    assert "Worktree type: Main" in result.output
+    assert "Branch: topic-not-default" in result.output
+    assert "Main worktrees: 1" in result.output
+    assert "Linked worktrees: 0" in result.output
+    assert "Hidden repositories" not in result.output
+
+
+@pytest.mark.parametrize("location", ["main", "linked-subdirectory", "outside-prefix"])
+def test_list_current_uses_callers_directory_not_worktrunk_query_root(tmp_path, monkeypatch, location):
+    root = tmp_path / "repo"
+    linked = tmp_path / "feature"
+    entries = [_entry("main", root, is_main=True, is_current=True), _entry("feature", linked, is_current=False)]
+    cwd = {"main": root, "linked-subdirectory": linked / "nested", "outside-prefix": tmp_path / "feature-other"}[
+        location
+    ]
+    cwd.mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(cwd)
+    monkeypatch.setattr(cli, "console", Console(width=80, highlight=False))
+    monkeypatch.setattr(repo, "scope_repos", lambda _path: [root])
+    monkeypatch.setattr(wt, "require_wt", lambda: None)
+    monkeypatch.setattr(wt, "list_worktrees_many", lambda _roots: {root: entries})
+    caller_root = root if location == "main" else linked if location == "linked-subdirectory" else cwd
+    caller = Mock(return_value=subprocess.CompletedProcess([], 0, str(caller_root) + "\n"))
+    monkeypatch.setattr(cli.subprocess, "run", caller)
+    monkeypatch.setattr(cli.park_mod, "parked_at_many", lambda _roots: {})
+
+    result = runner.invoke(app, ["list", "--no-size", "--no-pr", "--no-remote-default"])
+
+    assert result.exit_code == 0, result.output
+    caller.assert_called_once()
+    assert caller.call_args.args[0] == ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"]
+    assert caller.call_args.kwargs["timeout"] == 5
+    main, feature = result.output.split("W2\n", 1)
+    assert f"Current: {'Yes' if location == 'main' else 'No'}" in main
+    assert f"Current: {'Yes' if location == 'linked-subdirectory' else 'No'}" in feature
+    assert entries[0]["is_current"] is True and entries[1]["is_current"] is False
+
+
+@pytest.mark.parametrize("flags", [[], ["--no-pr", "--no-remote-default"]])
+def test_list_explain_skips_scope_and_all_collection(monkeypatch, flags):
+    forbidden = Mock(side_effect=AssertionError("explanation performed collection"))
+    for module, name in (
+        (repo, "scope_repos"),
+        (wt, "require_wt"),
+        (wt, "list_worktrees_many"),
+        (cli.list_facts, "collect_many"),
+        (cli.list_facts, "revalidate_many"),
+        (cli, "_collect_list_prs"),
+        (cli, "_collect_remote_defaults"),
+        (cli.sizes, "dir_sizes_kb"),
+    ):
+        monkeypatch.setattr(module, name, forbidden)
+
+    result = runner.invoke(app, ["list", "--explain", *flags])
+
+    assert result.exit_code == 0, result.output
+    assert all(
+        label in result.output
+        for label in (
+            "Checkout",
+            "Worktree registration",
+            "Local changes",
+            "Activity",
+            "Local branch history",
+            "Worktrunk report",
+            "PR lookup",
+            "PR state",
+            "HEAD integration",
+            "HEAD state",
+        )
+    )
+    assert "Unknown:" in result.output and "N/A:" in result.output and "Not checked:" in result.output
+    forbidden.assert_not_called()
+
+
+def test_list_head_commit_time_is_separate_from_directory_creation(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     now = 2_000_000_000.0
-    monkeypatch.setattr(cli.time, "time", lambda: now)
     entries = [
         _entry("main", repo_dir, is_main=True),
         _entry("feature", tmp_path / "feature", commit_ts=now - 2 * 86400),
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    _stub_list_facts(monkeypatch, repo_dir, entries, **{entries[1]["path"]: {"directory_created": now - 86400}})
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "200"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
-    assert "Modified" in result.output
-    flat_output = result.output.replace("\n", "")
-    assert "feature" in flat_output
-    # the feature row's Modified cell: 2 days since its last commit
-    assert " 2d " in flat_output
+    assert "HEAD committed: " + _local_time(now - 2 * 86400) in result.output
+    assert "Directory created: " + _local_time(now - 86400) in result.output
+    assert "Local file changed: Unknown" in result.output
+    assert "Modified" not in result.output
+    assert " 2d " not in result.output
 
 
-def test_list_modified_column_reads_the_newest_dirty_mtime(tmp_path, monkeypatch):
-    """A dirty worktree with fresh uncommitted edits must not read as
-    stale just because its HEAD is old: Modified takes the newest mtime
-    among the changed or untracked files when that is later than the
-    commit."""
+def test_list_local_file_time_is_separate_from_head_commit_time(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     now = 2_000_000_000.0
-    monkeypatch.setattr(cli.time, "time", lambda: now)
-    scratch = repo_dir / "scratch.txt"
-    scratch.write_text("uncommitted")
-    edit_ts = now - 3 * 3600
-    os.utime(scratch, (edit_ts, edit_ts))
     entries = [
         _entry("main", repo_dir, is_main=True),
-        _entry("dirty", repo_dir, commit_ts=now - 5 * 86400, dirty=True),
+        _entry("dirty", tmp_path / "dirty", commit_ts=now - 5 * 86400, dirty=True),
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
+    _stub_list_facts(monkeypatch, repo_dir, entries, **{entries[1]["path"]: {"file_changed": now - 3 * 3600}})
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "200"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
-    flat_output = result.output.replace("\n", "")
-    # the dirty row's Modified cell: 3 hours since the edit, not 5 days
-    # since the commit
-    assert " 3h " in flat_output
+    assert "Local file changed: " + _local_time(now - 3 * 3600) in result.output
+    assert "HEAD committed: " + _local_time(now - 5 * 86400) in result.output
+    assert " 3h " not in result.output
 
 
 def test_list_modified_column_marks_stale_rows(tmp_path, monkeypatch):
@@ -1292,39 +1432,46 @@ def test_list_json_includes_last_modified(tmp_path, monkeypatch):
     assert "last_modified" in data[0]
 
 
-def test_list_rendering_never_launches_a_subprocess_for_modified_times(tmp_path, monkeypatch):
-    """Collection happens once, up front, in one batch per dirty worktree.
-    Rendering the Modified column must read the prepared values and never
-    call git itself (the old cell formatter ran `git status` per row)."""
+def test_list_collects_and_revalidates_facts_once_before_rendering(tmp_path, monkeypatch):
+    """Human output consumes prepared facts, not the legacy mtime collector."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     now = 2_000_000_000.0
-    monkeypatch.setattr(cli.time, "time", lambda: now)
     entries = [
         _entry("main", repo_dir, is_main=True, dirty=True),
         _entry("dirty-a", tmp_path / "a", commit_ts=now - 5 * 86400, dirty=True),
         _entry("dirty-b", tmp_path / "b", commit_ts=now - 6 * 86400, dirty=True),
-        _entry("clean", tmp_path / "c", commit_ts=now - 86400),
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
-    single_calls: list[str] = []
-    batches: list[list[str]] = []
-    monkeypatch.setattr(git, "newest_dirty_mtime", lambda path: single_calls.append(str(path)))
+    collect, facts = _stub_list_facts(
+        monkeypatch,
+        repo_dir,
+        entries,
+        **{row["path"]: {"file_changed": now - 3600} for row in entries},
+    )
+    legacy = Mock(side_effect=AssertionError("human listing used legacy mtime collection"))
+    monkeypatch.setattr(git, "newest_dirty_mtime", legacy)
+    monkeypatch.setattr(git, "newest_dirty_mtimes", legacy)
+    events = []
+    validate = Mock(side_effect=lambda rows, snapshot: events.append("revalidate") or snapshot)
+    monkeypatch.setattr(cli.list_facts, "revalidate_many", validate)
+    render = cli.list_view.render
 
-    def batch(paths):
-        paths = [str(p) for p in paths]  # the caller passes a one-shot generator
-        batches.append(sorted(paths))
-        return {p: now - 3600 for p in paths}
+    def render_after_revalidate(*args, **kwargs):
+        assert events == ["revalidate"]
+        assert kwargs["current_path"] is None
+        events.append("render")
+        return render(*args, **kwargs)
 
-    monkeypatch.setattr(git, "newest_dirty_mtimes", batch)
-
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "200"})
+    monkeypatch.setattr(cli.list_view, "render", render_after_revalidate)
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
-    # One batch, covering exactly the displayed dirty rows (not main, not clean).
-    assert batches == [sorted([str(tmp_path / "a"), str(tmp_path / "b")])]
-    assert single_calls == []
-    assert result.output.count(" 1h ") >= 2
+    collect.assert_called_once_with({repo_dir: entries})
+    validate.assert_called_once_with({repo_dir: entries}, facts)
+    legacy.assert_not_called()
+    assert events == ["revalidate", "render"]
+    assert result.output.count("Local file changed: " + _local_time(now - 3600)) == 3
 
 
 def test_last_modified_requires_a_prepared_value_for_a_dirty_entry(tmp_path):
@@ -2213,7 +2360,7 @@ def test_unpark_not_parked_is_a_note_not_an_error(tmp_path, monkeypatch):
     assert "'feat' @ repo is not parked." in result.output
 
 
-def test_list_parked_rows_sort_last_and_show_the_mark(tmp_path, monkeypatch):
+def test_list_parked_mark_and_timestamp_are_separate_fields(tmp_path, monkeypatch):
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
@@ -2226,20 +2373,23 @@ def test_list_parked_rows_sort_last_and_show_the_mark(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     park.park(repo_dir, "parked-branch", at=now - 6 * 86400)
+    _stub_list_facts(monkeypatch, repo_dir, entries)
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "160"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
-    flat = result.output.replace("\n", "")
-    assert "parked 6d" in flat
-    # unparked first, parked after, within the repo section
-    assert flat.index("active-branch") < flat.index("parked-branch")
+    parked = result.output.split("Branch: parked-branch", 1)[1]
+    assert "Parked: Yes" in parked
+    assert "Parked at: " + _local_time(now - 6 * 86400) in parked
+    assert "Follow-up: No" in parked
+    active = result.output.split("Branch: active-branch", 1)[1].split("Branch: parked-branch", 1)[0]
+    assert "Parked: No" in active
+    assert "Parked at: N/A" in active
+    assert park.parked_at(repo_dir) == {"parked-branch": now - 6 * 86400}
 
 
 def test_list_marks_follow_up_when_the_head_moved_since_parking(tmp_path, monkeypatch):
-    """A branch head newer than the parked mark means follow-up already
-    happened: the worktree reads as active again (no dimming, no 'parked'
-    label) with a 'follow-up' note, and no writes, the mark is left alone."""
+    """Follow-up does not erase the stored parked mark or hide its timestamp."""
     repo_dir = _init_repo(tmp_path / "repo")
     _stub_wt(monkeypatch)
     monkeypatch.setattr(cli, "_creation_ts", lambda _path: None)
@@ -2251,13 +2401,15 @@ def test_list_marks_follow_up_when_the_head_moved_since_parking(tmp_path, monkey
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     park.park(repo_dir, "comeback", at=now - 10 * 86400)
+    _stub_list_facts(monkeypatch, repo_dir, entries)
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "160"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
-    flat = result.output.replace("\n", "")
-    assert "follow-up" in flat
-    assert "· parked" not in flat
+    comeback = result.output.split("Branch: comeback", 1)[1]
+    assert "Follow-up: Yes" in comeback
+    assert "Parked: Yes" in comeback
+    assert "Parked at: " + _local_time(now - 10 * 86400) in comeback
     # read-time only: the mark itself is untouched
     assert park.parked_at(repo_dir) == {"comeback": now - 10 * 86400}
 
