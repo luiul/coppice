@@ -30,7 +30,6 @@ def creation(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_freshen_explicit_base", Mock())
     monkeypatch.setattr(workflow, "_run", Mock(side_effect=AssertionError("Unexpected runtime subprocess")))
     monkeypatch.setattr(herdr.Target, "call", Mock(side_effect=AssertionError("Unexpected Herdr runtime call")))
-    monkeypatch.setattr(herdr, "STATE_ROOT", tmp_path / "herdr-state")
     monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "setup-state")
     events = []
 
@@ -46,7 +45,7 @@ def creation(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "_switch_with_recovery", switch_mock)
     monkeypatch.setattr(shell, "write_cd_file", cd)
     setup = workflow.Setup(root, ("post-start=[]",), ())
-    target = herdr.Target("/tmp/named-herdr.sock", "/fake/herdr")
+    target = herdr.Target("/fake/wt-herdr")
     prepare = Mock(side_effect=lambda *args: events.append(("prepare", *args)) or (setup, target))
     monkeypatch.setattr(herdr, "prepare_workflow", prepare)
     monkeypatch.setattr(orca, "prepare_workflow", Mock(return_value=setup))
@@ -73,12 +72,12 @@ def test_herdr_preflight_and_setup_precede_handoff_using_exact_wt_path(creation)
 
     assert result.exit_code == 0, result.output
     assert c.events == [
-        ("prepare", c.root, None),
+        ("prepare", c.root),
         ("ready", c.setup, "probe", "main"),
         ("switch", c.root, "probe", {"create": True, "base": "main", "config_overrides": c.setup.suppress}),
         ("setup-complete",), ("cd", c.checkout), ("handoff", c.target, c.root, c.checkout),
     ]
-    c.prepare.assert_called_once_with(c.root, None)
+    c.prepare.assert_called_once_with(c.root)
     c.ready.assert_called_once()
     c.register.assert_called_once_with(c.root)
     c.cd.assert_called_once_with(c.checkout)
@@ -88,22 +87,18 @@ def test_herdr_preflight_and_setup_precede_handoff_using_exact_wt_path(creation)
 
 
 @pytest.mark.parametrize("path_kind", ["default", "root", "nested"])
-@pytest.mark.parametrize("session", [None, "review session"])
-def test_herdr_resolves_default_root_and_nested_paths_before_selecting_session(creation, path_kind, session):
+def test_herdr_resolves_default_root_and_nested_paths_before_helper_check(creation, path_kind):
     c = creation
     args = ["herdr"]
     supplied_path = {"default": ".", "root": str(c.root), "nested": str(c.root / "src" / "deep")}[path_kind]
     if path_kind != "default":
         args += [supplied_path]
     args += ["--branch", "feature/probe"]
-    if session:
-        args += ["--session", session]
-
     result = runner.invoke(cli.app, args)
 
     assert result.exit_code == 0, result.output
     c.resolve.assert_called_once_with(supplied_path)
-    c.prepare.assert_called_once_with(c.root, session)
+    c.prepare.assert_called_once_with(c.root)
     c.handoff.assert_called_once_with(c.target, c.root, c.checkout)
     c.cd.assert_called_once_with(c.checkout)
 
@@ -127,7 +122,7 @@ def test_creation_commands_have_matching_branch_base_and_yes_flags(creation, com
     cli._freshen_explicit_base.assert_called_once_with(c.root, "develop")
     c.cd.assert_called_once_with(c.checkout)
     if command == "herdr":
-        c.prepare.assert_called_once_with(c.root, None)
+        c.prepare.assert_called_once_with(c.root)
         c.handoff.assert_called_once_with(c.target, c.root, c.checkout)
         orca.prepare_workflow.assert_not_called()
     else:
@@ -214,20 +209,19 @@ def test_new_has_zero_orchestrator_calls(monkeypatch, creation, existing):
         guard.assert_not_called()
     herdr.Target.call.assert_not_called()
     workflow._run.assert_not_called()
-    assert not herdr.STATE_ROOT.exists()
     assert not workflow.STATE_ROOT.exists()
     assert "Pi" not in result.output
 
 
-@pytest.mark.parametrize("failure", [workflow.HandoffError("selected session stopped"), OSError("preflight failed")])
+@pytest.mark.parametrize("failure", [workflow.HandoffError("Herdr app unavailable"), OSError("preflight failed")])
 def test_herdr_preflight_failure_creates_nothing_and_writes_no_cd(creation, failure):
     c = creation
     c.prepare.side_effect = failure
-    result = runner.invoke(cli.app, ["herdr", str(c.root), "--branch", "probe", "--session", "review"])
+    result = runner.invoke(cli.app, ["herdr", str(c.root), "--branch", "probe"])
 
     assert result.exit_code == 1, result.output
     assert str(failure) in result.output
-    c.prepare.assert_called_once_with(c.root, "review")
+    c.prepare.assert_called_once_with(c.root)
     c.ready.assert_not_called()
     c.switch.assert_not_called()
     c.register.assert_not_called()
@@ -249,9 +243,8 @@ def test_shared_switch_failure_is_nonzero_without_handoff_or_cd(creation, failur
     c.cd.assert_not_called()
 
 
-@pytest.mark.parametrize("session", [None, "review session'quoted"])
 @pytest.mark.parametrize("failure_kind", ["setup", "handoff"])
-def test_failed_setup_or_handoff_preserves_cd_and_exact_branch_retry(creation, session, failure_kind):
+def test_failed_setup_or_handoff_preserves_cd_and_exact_branch_retry(creation, failure_kind):
     c = creation
     branch = "feature/quoted'branch"
     message = "setup failed" if failure_kind == "setup" else "focus failed"
@@ -264,8 +257,6 @@ def test_failed_setup_or_handoff_preserves_cd_and_exact_branch_retry(creation, s
     else:
         c.handoff.side_effect = workflow.HandoffError(message)
     args = ["herdr", str(c.root), "--branch", branch]
-    if session:
-        args += ["--session", session]
     result = runner.invoke(cli.app, args)
 
     assert result.exit_code == 1, result.output
@@ -274,8 +265,6 @@ def test_failed_setup_or_handoff_preserves_cd_and_exact_branch_retry(creation, s
     c.register.assert_called_once_with(c.root)
     c.switch.assert_called_once_with(c.root, branch, create=True, base="main", config_overrides=c.setup.suppress)
     expected = ["cop", "herdr", str(c.root), "--branch", branch, "--yes"]
-    if session:
-        expected += ["--session", session]
     assert shlex.split(result.output.split("Retry: ", 1)[1]) == expected
     if failure_kind == "setup":
         c.handoff.assert_not_called()
@@ -283,14 +272,28 @@ def test_failed_setup_or_handoff_preserves_cd_and_exact_branch_retry(creation, s
         c.handoff.assert_called_once_with(c.target, c.root, c.checkout)
 
 
+def test_herdr_rejects_removed_session_option_before_any_work(creation):
+    c = creation
+    result = runner.invoke(cli.app, ["herdr", str(c.root), "--branch", "probe", "--session", "legacy"])
+
+    assert result.exit_code == 2, result.output
+    assert "No such option: --session" in result.output
+    c.resolve.assert_not_called()
+    c.prepare.assert_not_called()
+    c.ready.assert_not_called()
+    c.switch.assert_not_called()
+    c.handoff.assert_not_called()
+    c.cd.assert_not_called()
+
+
 def test_herdr_handoff_oserror_keeps_shell_cd_and_returns_nonzero(creation):
     c = creation
     c.handoff.side_effect = OSError("state store unavailable")
-    result = runner.invoke(cli.app, ["herdr", str(c.root), "--branch", "probe", "--session", "review"])
+    result = runner.invoke(cli.app, ["herdr", str(c.root), "--branch", "probe"])
 
     assert result.exit_code == 1, result.output
     assert "state store unavailable" in result.output
     c.cd.assert_called_once_with(c.checkout)
     assert shlex.split(result.output.split("Retry: ", 1)[1]) == [
-        "cop", "herdr", str(c.root), "--branch", "probe", "--yes", "--session", "review",
+        "cop", "herdr", str(c.root), "--branch", "probe", "--yes",
     ]
