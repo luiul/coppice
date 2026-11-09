@@ -43,15 +43,17 @@ cop unpark feat-a                         # follow-up arrived: back to active (s
 cop relocate                             # move mismatched worktrees (flagged '@ other-dir/' in cop list) back to their template paths
 cop relocate --dry-run                   # ...preview the moves, changing nothing
 cop relocate ~/dbt-models                # ...scoped to one repo
-cop list                                 # worktrees across every known repo (age, last modified, size, dirty/merge status, PR state)
+cop list                                 # worktrees across every known repo (age, modified, size, dirty, local Merge, Remote default, PR)
 cop list ~/dbt-models                    # ...just this one
 cop list --all                           # ...also showing repos with no extra worktrees (hidden by default)
 cop list --verbose                       # ...with a column for each worktree's on-disk path
 cop list --no-size                       # skip the (directory-walking) size column, for a faster listing
-cop list --no-pr                         # skip GitHub lookup and hide the PR column
+cop list --no-pr                         # skip PR history lookup and hide the PR column
+cop list --no-remote-default             # skip remote integration checks and hide their column
+cop list --no-pr --no-remote-default     # no GitHub checks
 cop list --pr-detail                     # show all matching PRs and their URLs
 cop link-pr                              # attach the current worktree's displayed PR to Orca
-cop list --json                          # raw Worktrunk data and local fields, with no PR lookup
+cop list --json                          # raw Worktrunk data and local fields, with no GitHub checks
 cop remove add-customer-id-column        # remove a worktree by branch name (branch kept unless merged/-D; parked worktrees are refused: cop unpark first)
 cop remove a b --repo dbt-models --yes
 cop remove                               # ...or omit the branch for an fzf multi-select picker
@@ -78,9 +80,26 @@ The lookup uses [`gh`](https://cli.github.com/) and the repo's GitHub `origin`. 
 
 `Unknown` means the lookup could not complete. A short stderr message gives the reason. `N/A` means there is no supported GitHub origin or no branch to check (detached HEAD). A stale worktree reference can still show PR information if it names a branch.
 
-Use `--no-pr` for a local listing without PR checks. It removes the column. `--pr` enables the default behavior explicitly. `--json` never performs this lookup or adds PR fields, even with `--pr`. `--pr-detail` cannot be combined with `--no-pr` or `--json`. Listing scope, `cop status`, cleanup decisions, and the `cop new` preview stay unchanged. Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
+Use `--no-pr` to skip PR history checks. It removes the PR column but leaves remote-default checks enabled. `--pr` enables the default behavior explicitly. `--json` never performs this lookup or adds PR fields, even with `--pr`. `--pr-detail` cannot be combined with `--no-pr` or `--json`. Listing scope, `cop status`, cleanup decisions, and the `cop new` preview stay unchanged. Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
 
 Run `cop link-pr [PATH]` to attach the primary PR for that worktree to an existing Orca workspace. The command defaults to the current worktree. It refuses missing, ambiguous, or changed workspace identity, never creates a workspace, and does not change comments or status. If the add times out, its outcome is unknown; check Orca before retrying.
+
+## Remote default in list
+
+The `Remote default` column checks committed HEAD against the actual default branch in GitHub's fresh `origin` metadata. The repo heading names the target, such as `origin/main` or `origin/master`. Local `Merge` still describes Worktrunk's local comparison. PR still describes branch-name history.
+
+- `Reached`: HEAD is an ancestor of the observed remote default SHA. Alternatively, a merged PR has this exact original head, the same head and base repo, the actual default branch as its target, and a merge commit reachable from the observed remote default.
+- `Pending`: complete ancestry and commit-associated PR checks found no integration into that target. Pushing only a feature branch does not mean it reached the remote default.
+- `Unknown`: missing commits, failed or malformed API evidence, timeouts, or a changed worktree identity prevent a result. A local-only commit may be unknown because GitHub cannot compare it.
+- `N/A`: no supported GitHub origin, detached HEAD, or a stale worktree reference.
+
+The lookup reads commit-associated PRs with complete pagination, so renamed branches do not lose squash-merge evidence. Only exact original heads count. New commits after a merge do not inherit that merge result. Rebase merges need the same exact-head and reachable-merge evidence; otherwise the result remains unconfirmed.
+
+Dirty edits are independent of committed HEAD. `dirty` plus `Reached` means commits reached the target but local edits remain. This column does not prove deployment, retained ignored files, or permission to remove a checkout. Cleanup and removal policy do not use it.
+
+Checks use up to eight concurrent repo workers, a 25-second budget per repo, and at most ten seconds per subprocess. Identical heads share evidence within a run. Worktree paths, branches, and heads are checked again before display. There is no persistent cache, fetch, ref update, or background polling. Results describe the observed remote snapshot, not a guarantee against later remote changes.
+
+Use `--no-remote-default` to omit the column and its checks. `--remote-default` enables it explicitly. Both flags are independent of `--pr/--no-pr`. `--json` performs no remote-default or PR checks and adds no fields. GitHub Enterprise, non-GitHub origins, and upstream fork PRs are not supported.
 
 ## Confirmation prompts
 

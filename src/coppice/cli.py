@@ -32,12 +32,13 @@ from typing import Annotated, Any, NamedTuple
 import typer
 from rich import box
 from rich.console import Console
+from rich.markup import escape as rich_escape
 from rich.table import Table
 from rich.text import Text
 from typer.core import TyperGroup
 
 from coppice import branch as branch_mod
-from coppice import confirm, gh, git, herdr, orca, repo, shell, sizes, vscode, workflow, wt
+from coppice import confirm, gh, git, herdr, orca, remote_default, repo, shell, sizes, vscode, workflow, wt
 from coppice import park as park_mod
 
 APP_HELP = """\
@@ -1112,6 +1113,35 @@ def _collect_list_prs(worktrees_by_repo: dict[Path, list[dict[str, Any]]]) -> di
         return dict(zip(pending, results, strict=True))
 
 
+def _collect_remote_defaults(
+    worktrees_by_repo: dict[Path, list[dict[str, Any]]],
+) -> dict[Path, remote_default.RemoteDefaultLookup]:
+    pending = [
+        root for root, entries in worktrees_by_repo.items()
+        if any(not w.get("is_main") and w.get("branch") and not _is_stale(w) for w in entries)
+    ]
+    if not pending:
+        return {}
+    with ThreadPoolExecutor(max_workers=min(8, len(pending))) as pool:
+        results = pool.map(
+            lambda root: remote_default.lookup(root, worktrees_by_repo[root]), pending
+        )
+        return dict(zip(pending, results, strict=True))
+
+
+def _remote_default_cell(w: dict[str, Any], lookup: remote_default.RemoteDefaultLookup | None) -> Text:
+    if _is_stale(w) or not w.get("branch"):
+        return Text("N/A", style="dim")
+    evidence = lookup.cells.get(w.get("path", "")) if lookup else None
+    state = evidence.state if evidence else "unknown"
+    labels = {"reached": "Reached", "pending": "Pending", "unknown": "Unknown", "unsupported": "N/A"}
+    styles = {"reached": _STYLE_MERGED, "pending": _STYLE_UNMERGED, "unknown": "yellow", "unsupported": "dim"}
+    cell = Text(labels[state], style=styles[state])
+    if _effectively_parked(w):
+        cell.stylize("dim")
+    return cell
+
+
 def _pr_cell(w: dict[str, Any], lookup: gh.PullRequestLookup | None) -> Text:
     """Render collected PR data without IO. A stale branch is still queryable."""
     branch = w.get("branch")
@@ -1124,7 +1154,7 @@ def _pr_cell(w: dict[str, Any], lookup: gh.PullRequestLookup | None) -> Text:
         return Text("No PR", style="dim")
     pr = prs[0]
     styles = {"open": _STYLE_UNMERGED, "draft": f"dim {_STYLE_UNMERGED}", "merged": _STYLE_MERGED, "closed": ""}
-    cell = Text(f"{pr.state.title()} ", style=styles[pr.state])
+    cell = Text(f"{pr.state.title()} ", style=styles[pr.state], overflow="fold", no_wrap=False)
     cell.append(f"#{pr.number}", style=f"{styles[pr.state]} link {pr.url}".strip())
     if len(prs) > 1:
         cell.append(f" +{len(prs) - 1}", style="dim")
@@ -1169,6 +1199,7 @@ def _render_list(
     verbose: bool,
     dirty_mtimes: dict[str, float | None],
     pr_lookups: dict[Path, gh.PullRequestLookup] | None = None,
+    remote_lookups: dict[Path, remote_default.RemoteDefaultLookup] | None = None,
 ) -> tuple[int, int, int, int]:
     """Render `list`'s worktree listing. Returns (worktree count, summed
     on-disk size in KB, stale count, hidden-repo count) for the caller's
@@ -1227,33 +1258,43 @@ def _render_list(
             console.print(f"{_list_section_heading(repo_root, main_entry)} {_one_liner_note(main_entry)}")
         return 0, total_kb, 0, n_hidden
 
-    table = Table(box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False)
-    table.add_column("Branch")
+    table = Table(
+        box=box.SIMPLE_HEAVY, header_style="bold", pad_edge=False, show_edge=False,
+        padding=(0, 1, 0, 0) if remote_lookups is not None else (0, 1),
+    )
+    table.add_column("Branch", min_width=14 if not show_size else 10, overflow="fold")
     table.add_column("Created", justify="right")
     table.add_column("Modified", justify="right")
     if show_size:
         table.add_column("Size", justify="right")
     if verbose:
         table.add_column("Path")
-    table.add_column("Working tree")
-    table.add_column("Merge")
+    table.add_column("Working tree", min_width=5)
+    table.add_column("Merge", min_width=8)
+    if remote_lookups is not None:
+        table.add_column("Remote default", width=7, overflow="fold")
     if pr_lookups is not None:
-        table.add_column("PR", max_width=16, overflow="fold")
+        table.add_column("PR", width=16, overflow="fold")
 
-    def _section_row(repo_root: Path, main_entry: dict[str, Any] | None, *, empty: bool) -> list[str]:
+    def _section_row(repo_root: Path, main_entry: dict[str, Any] | None, *, empty: bool) -> list[str | Text]:
         """A repo's heading row (or its one-liner row, when EMPTY): name +
         main branch in the Branch column, the repo's own path in the Path
         column in verbose mode, everything else blank."""
         heading = _list_section_heading(repo_root, main_entry)
+        lookup = (remote_lookups or {}).get(repo_root)
         if empty:
             heading = f"{heading} {_one_liner_note(main_entry)}"
-        cells = [heading, "", ""]
+        if lookup and lookup.branch:
+            heading += f"\n[dim]origin/{rich_escape(lookup.branch)}[/]"
+        cells: list[str | Text] = [Text.from_markup(heading, overflow="fold"), "", ""]
         if show_size:
             cells.append("")
         if verbose:
             path = Path(main_entry["path"]) if main_entry is not None and main_entry.get("path") else repo_root
             cells.append(f"[dim]{_short_path(path, max_len=40)}[/]")
         cells += ["", ""]
+        if remote_lookups is not None:
+            cells.append("")
         if pr_lookups is not None:
             cells.append("")
         return cells
@@ -1275,13 +1316,23 @@ def _render_list(
                 w, show_size=show_size, size_cache=size_cache, dirty_mtimes=dirty_mtimes, verbose=verbose, indent="  "
             )
             total_kb += size_kb or 0
+            row: list[str | Text] = list(cells)
+            if remote_lookups is not None:
+                branch_cell = Text.from_markup(cells[0], overflow="fold")
+                branch_cell.no_wrap = False
+                row[0] = branch_cell
+            if remote_lookups is not None:
+                row.append(_remote_default_cell(w, remote_lookups.get(repo_root)))
             if pr_lookups is not None:
-                table.add_row(
-                    *cells, _pr_cell(w, pr_lookups.get(repo_root)),
-                    end_section=not last_section and j == len(ordered) - 1,
-                )
-            else:
-                table.add_row(*cells, end_section=not last_section and j == len(ordered) - 1)
+                pr_cell = _pr_cell(w, pr_lookups.get(repo_root))
+                if console.width < 100 and " +" in pr_cell.plain:
+                    split_at = pr_cell.plain.rfind(" +")
+                    count = pr_cell[split_at + 1:]
+                    pr_cell = pr_cell[:split_at]
+                    pr_cell.append("\n")
+                    pr_cell.append_text(count)
+                row.append(pr_cell)
+            table.add_row(*row, end_section=not last_section and j == len(ordered) - 1)
     console.print(table)
     return total, total_kb, n_stale, n_hidden
 
@@ -1321,6 +1372,13 @@ def cmd_list(
     show_pr: Annotated[
         bool,
         typer.Option("--pr/--no-pr", help="Show GitHub PR states (needs gh and network); --no-pr skips lookup."),
+    ] = True,
+    show_remote_default: Annotated[
+        bool,
+        typer.Option(
+            "--remote-default/--no-remote-default",
+            help="Check committed HEAD against fresh origin default history; --no-remote-default skips the check.",
+        ),
     ] = True,
     pr_detail: Annotated[
         bool,
@@ -1381,6 +1439,11 @@ def cmd_list(
             spinner.update("[dim]Checking GitHub PRs…[/dim]")
             pr_lookups = _collect_list_prs(worktrees_by_repo)
 
+        remote_lookups: dict[Path, remote_default.RemoteDefaultLookup] | None = None
+        if show_remote_default:
+            spinner.update("[dim]Checking remote default branches…[/dim]")
+            remote_lookups = _collect_remote_defaults(worktrees_by_repo)
+
         # The Modified column of every displayed (non-main) row, collected up
         # front so rendering stays free of subprocesses.
         spinner.update("[dim]Reading modification times…[/dim]")
@@ -1400,11 +1463,22 @@ def cmd_list(
             else:
                 size_cache = {}
 
+        if remote_lookups:
+            with ThreadPoolExecutor(max_workers=min(8, len(remote_lookups))) as pool:
+                roots = list(remote_lookups)
+                refreshed = pool.map(
+                    lambda root: remote_default.revalidate(root, worktrees_by_repo[root], remote_lookups[root]), roots
+                )
+                remote_lookups = dict(zip(roots, refreshed, strict=True))
         spinner.stop()
 
     for root, lookup in (pr_lookups or {}).items():
         if lookup.status == "unknown":
             err.print(Text(f"PR lookup unavailable for {root.name}: {lookup.reason or 'unknown error'}.", style="dim"))
+
+    for root, remote_lookup in (remote_lookups or {}).items():
+        if remote_lookup.reason:
+            err.print(Text(f"Remote default unavailable for {root.name}: {remote_lookup.reason}.", style="dim"))
 
     total, total_kb, total_stale, n_hidden = _render_list(
         repos,
@@ -1415,6 +1489,7 @@ def cmd_list(
         verbose=verbose,
         dirty_mtimes=dirty_mtimes,
         pr_lookups=pr_lookups,
+        remote_lookups=remote_lookups,
     )
 
     if pr_detail and pr_lookups:

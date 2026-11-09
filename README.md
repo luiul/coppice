@@ -80,6 +80,21 @@ Open and draft PRs take priority. Otherwise, the most recently updated closed or
 
 Use `cop link-pr PATH` to attach the displayed PR to an existing Orca workspace. It refuses an ambiguous workspace and does not create one. Use `cop list --no-pr` to skip the lookup. `cop list --json` stays unchanged and does not check PRs. Lookups use complete pagination and bounded concurrent calls, without a cache. Upstream PR discovery for forks, GitHub Enterprise, and branches without worktrees are not included.
 
+## Remote default
+
+`cop list` also shows whether each worktree's committed HEAD reached the fresh `origin` default branch. The repo heading names the target, such as `origin/main`.
+
+| Remote default cell | Meaning |
+|---|---|
+| `Reached` | Current HEAD is in the remote default history, or exact merged-PR evidence confirms integration. |
+| `Pending` | Complete ancestry and commit-associated PR checks found no integration into that target. |
+| `Unknown` | Evidence is unavailable, incomplete, or the checkout changed during the check. |
+| `N/A` | No supported GitHub origin or active branch can be checked. |
+
+The check supports direct integration and PR merges, including squash merges with an exact original head and a reachable merge commit. A renamed branch can still match through commit identity. Newer commits do not inherit an older PR's merge result. A local-only commit that GitHub cannot compare shows `Unknown`, not `Pending`.
+
+`Reached` describes committed HEAD, not dirty edits, live deployment, or removal permission. Local `Merge` and PR history stay separate. Use `--no-remote-default` to skip this check. Use `--no-pr --no-remote-default` for a listing without GitHub checks. JSON remains unchanged and performs neither lookup. Checks do not fetch or change Git refs.
+
 ## Pi in Orca or Herdr
 
 Use an explicit orchestrator command to start work. Both commands use wt to create or reuse a worktree, finish setup, start or reuse Pi, focus its terminal, and enter the worktree through shell integration. The selected orchestrator must be running.

@@ -34,6 +34,7 @@ def _isolate_cli_tests(tmp_path, monkeypatch):
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "known-repos")
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(vscode, "_run_osascript", lambda _script: None)
+    monkeypatch.setattr(cli, "_collect_remote_defaults", lambda entries: {})
     monkeypatch.delenv(shell.CD_FILE_ENV_VAR, raising=False)
 
 

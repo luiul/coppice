@@ -43,6 +43,7 @@ def listing(tmp_path, monkeypatch):
     monkeypatch.setattr(wt, "require_wt", lambda: None)
     monkeypatch.setattr(wt, "list_worktrees_many", lambda roots: {root: entries})
     monkeypatch.setattr(cli.park_mod, "parked_at_many", lambda roots: {})
+    monkeypatch.setattr(cli, "_collect_remote_defaults", lambda entries: {})
     lookup = Mock(
         return_value=gh.PullRequestLookup(
             "ok",
