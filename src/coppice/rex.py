@@ -1,4 +1,4 @@
-"""Open a shell tab in one local Rex session. Never select a desktop client session."""
+"""Open a shell tab in a local Rex project session or an explicit override."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from . import workflow
+from . import repo, workflow
 from .workflow import HandoffError
 
 STATE_ROOT = Path.home() / ".cache" / "coppice" / "rex"
@@ -67,25 +67,14 @@ def _id(value: Any, kind: str) -> bool:
 
 
 @dataclass(frozen=True)
-class Target:
+class Server:
     binary: str
     endpoint: str
     host: str
     instance: str
-    session: str
 
     def call(self, args: list[str], path: Path) -> dict[str, Any]:
         return _call(self.binary, args, cwd=path, endpoint=self.endpoint)
-
-    def inspect(self, path: Path) -> dict[str, Any]:
-        data = self.call(["session", "inspect", self.session, "--json"], path)
-        if (
-            data.get("session_id") != self.session
-            or not isinstance(data.get("windows"), list)
-            or any(not isinstance(row, dict) for row in data["windows"])
-        ):
-            raise HandoffError("Rex did not confirm the requested session.")
-        return data
 
     def recheck(self, path: Path) -> None:
         current = self.call(["whoami", "--json"], path)
@@ -97,13 +86,69 @@ class Target:
             raise HandoffError("The Rex server changed. No tab was opened or focused.")
 
 
-def prepare(path: Path, session: str | None) -> Target:
+@dataclass(frozen=True)
+class Target(Server):
+    session: str
+
+    def inspect(self, path: Path) -> dict[str, Any]:
+        data = self.call(["session", "inspect", self.session, "--json"], path)
+        if (
+            data.get("session_id") != self.session
+            or not isinstance(data.get("windows"), list)
+            or any(not isinstance(row, dict) for row in data["windows"])
+        ):
+            raise HandoffError("Rex did not confirm the requested session.")
+        return data
+
+
+@dataclass(frozen=True)
+class ProjectTarget(Server):
+    name: str
+    common: Path
+
+    @property
+    def record(self) -> Path:
+        key = _key(self.host, str(self.common))
+        return STATE_ROOT / f"project-{key}.json"
+
+    def bind(self, session: str) -> Target:
+        return Target(self.binary, self.endpoint, self.host, self.instance, session)
+
+    def resolve_session(self, path: Path) -> tuple[Target | None, dict[str, Any] | None]:
+        """Check the binding or find a candidate to verify against a pending create."""
+        rows = self.call(["session", "ls", "--json"], path).get("sessions")
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict)
+            or not _id(row.get("session_id"), "session")
+            or not isinstance(row.get("label"), str)
+            for row in rows
+        ):
+            raise HandoffError("Rex returned an unreadable session list.")
+        ids = {row["session_id"] for row in rows}
+        if len(ids) != len(rows):
+            raise HandoffError("Rex returned duplicate session IDs.")
+        saved = _read_project_record(self.record)
+        if saved is not None and saved.get("session") in ids:
+            return self.bind(saved["session"]), None
+        matches = [row["session_id"] for row in rows if row["label"] == self.name]
+        if saved is not None and "tab" in saved:
+            if len(matches) != 1:
+                raise _project_unconfirmed(self, "No unique session matches the saved creation request.")
+            return self.bind(matches[0]), saved
+        if matches:
+            ids_text = ", ".join(matches)
+            raise HandoffError(
+                f"Rex session name {self.name!r} is already in use ({ids_text}). "
+                "Use --session with the intended full session ID, or rename the other session in Rex."
+            )
+        return None, None
+
+
+def prepare(path: Path, session: str | None) -> Target | ProjectTarget:
     if not workflow.manual_invocation():
         raise HandoffError("cop rex needs an interactive, non-agent shell. Use cop new for worktree-only creation.")
-    selected = session if session is not None else os.environ.get("REX_SESSION")
-    if not _id(selected, "session"):
-        raise HandoffError("Run from a local Rex session or pass --session with a full ID from rex session ls --json.")
-    assert selected is not None
+    if session is not None and not _id(session, "session"):
+        raise HandoffError("Pass --session with a full ID from rex session ls --json.")
     binary = _binary()
     identity = _call(binary, ["whoami", "--json"], cwd=path)
     endpoint, host, instance = (identity.get(k) for k in ("endpoint", "host_id", "instance_id"))
@@ -118,9 +163,16 @@ def prepare(path: Path, session: str | None) -> Target:
         or not instance
     ):
         raise HandoffError("Rex did not confirm a local Unix socket server.")
-    target = Target(binary, endpoint, host, instance, selected)
-    target.inspect(path)
-    return target
+    if session is not None:
+        target = Target(binary, endpoint, host, instance, session)
+        target.inspect(path)
+        return target
+    name, common = _project_identity(path)
+    if not name or name.startswith("-") or len(name) > 128 or not name.isprintable():
+        raise HandoffError("The Git project name cannot be used as a Rex session label. Pass --session instead.")
+    project = ProjectTarget(binary, endpoint, host, instance, name, common)
+    project.resolve_session(path)
+    return project
 
 
 def _matching_block(target: Target, path: Path, row: dict[str, Any]) -> str | None:
@@ -146,14 +198,139 @@ def _matching_block(target: Target, path: Path, row: dict[str, Any]) -> str | No
     return block_id if Path(cwd).resolve() == path else None
 
 
-def handoff(target: Target, path: Path, *, label: str) -> str:
+def _project_identity(path: Path) -> tuple[str, Path]:
+    try:
+        return repo.project_identity(path)
+    except repo.RepoResolutionError as exc:
+        raise HandoffError(str(exc)) from exc
+
+
+def _key(*parts: str) -> str:
+    return hashlib.sha256(os.fsencode("\0".join(parts))).hexdigest()
+
+
+def _tab_record(target: Target, path: Path) -> Path:
+    return STATE_ROOT / (_key(target.host, target.session, str(path)) + ".json")
+
+
+def _read_project_record(path: Path) -> dict[str, Any] | None:
+    try:
+        saved = json.loads(path.read_text())
+        if isinstance(saved, dict) and (
+            (set(saved) == {"session"} and _id(saved["session"], "session"))
+            or (
+                set(saved) == {"tab", "checkout"}
+                and isinstance(saved["tab"], str)
+                and isinstance(saved["checkout"], str)
+                and Path(saved["checkout"]).is_absolute()
+            )
+        ):
+            return saved
+    except FileNotFoundError:
+        return None
+    except ValueError:
+        pass
+    raise HandoffError(f"Cannot read the Rex project session record at {path}. Inspect it before retrying.")
+
+
+def _project_unconfirmed(project: ProjectTarget, detail: str) -> HandoffError:
+    return HandoffError(
+        f"Rex project session creation is unconfirmed for {project.name!r}. {detail} "
+        f"If you have verified the session was not created, remove only this pending record, then retry: "
+        f"{shlex.join(['rm', '--', str(project.record)])}"
+    )
+
+
+def _remember_first_tab(
+    project: ProjectTarget,
+    target: Target,
+    checkout: Path,
+    title: str,
+    *,
+    wait: bool = False,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + 3
+    while True:
+        try:
+            inventory = target.inspect(checkout)
+            rows = [row for row in inventory["windows"] if row.get("label") == title]
+            if inventory.get("label") != project.name or len(rows) != 1 or not _id(rows[0].get("window_id"), "window"):
+                raise HandoffError("Rex did not return the expected session and first tab.")
+            block = _matching_block(target, checkout, rows[0])
+            if block is None:
+                raise HandoffError("The first tab no longer points to the requested worktree.")
+            row = rows[0]
+            record = {"label": title, "window": row["window_id"], "block": block}
+            workflow._save(_tab_record(target, checkout), record)
+            workflow._save(project.record, {"session": target.session})
+            return record
+        except HandoffError as exc:
+            if not wait or time.monotonic() >= deadline:
+                raise _project_unconfirmed(project, str(exc)) from exc
+            time.sleep(0.15)
+
+
+def _project_handoff(project: ProjectTarget, path: Path, label: str) -> str:
+    # Serialize by session label as well as by checkout. Two different clones
+    # with the same project name must not each create a session with that label.
+    lock = STATE_ROOT / ("session-" + _key(project.host, project.name))
+    with workflow.checkout_lock(lock):
+        project.recheck(path)
+        if _project_identity(path) != (project.name, project.common):
+            raise HandoffError("The selected worktree no longer belongs to the Rex project.")
+        target, pending = project.resolve_session(path)
+        if target is not None:
+            if pending is not None:
+                checkout = Path(pending["checkout"])
+                with workflow.checkout_lock(checkout):
+                    if _project_identity(checkout) != (project.name, project.common):
+                        raise _project_unconfirmed(project, "Cannot verify the earlier checkout's project identity.")
+                    _remember_first_tab(project, target, checkout, pending["tab"])
+            message = _tab_handoff(target, path, label=label)
+            return f"{message} Project session: {project.name!r}."
+        with workflow.checkout_lock(path):
+            _require_ready(path)
+            STATE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
+            title = _tab_title(label)
+            workflow._save(project.record, {"tab": title, "checkout": str(path)})
+            try:
+                reply = project.call(["new", project.name, "-c", str(path), "--window", title, "--json"], path)
+            except CliNotStarted:
+                project.record.unlink()
+                raise
+            except HandoffError as exc:
+                raise _project_unconfirmed(project, str(exc)) from exc
+            session = reply.get("session_id")
+            if not isinstance(session, str) or not _id(session, "session"):
+                raise _project_unconfirmed(project, "Rex did not provide a valid session ID.")
+            target = project.bind(session)
+            first = _remember_first_tab(project, target, path, title, wait=True)
+            _verify_focus(target, path, first["window"], first["block"])
+            return f"Opened a shell tab in the new Rex session {project.name!r}."
+
+
+def _require_ready(path: Path) -> None:
+    if workflow._setup_path(path).exists():
+        raise HandoffError("Worktree setup is still pending. Finish setup before opening it in Rex.")
+
+
+def _tab_title(label: str) -> str:
+    # The tag is only recovery evidence. Normal reuse binds full IDs and live cwd.
+    return f"{label[:113]} [{uuid.uuid4().hex[:12]}]"
+
+
+def handoff(target: Target | ProjectTarget, path: Path, *, label: str) -> str:
     path = path.resolve(strict=True)
-    key = hashlib.sha256(os.fsencode(f"{target.host}\0{target.session}\0{path}")).hexdigest()
-    record = STATE_ROOT / (key + ".json")
+    if isinstance(target, ProjectTarget):
+        return _project_handoff(target, path, label)
+    return _tab_handoff(target, path, label=label)
+
+
+def _tab_handoff(target: Target, path: Path, *, label: str) -> str:
+    record = _tab_record(target, path)
     with workflow.checkout_lock(path):
         target.recheck(path)
-        if workflow._setup_path(path).exists():
-            raise HandoffError("Worktree setup is still pending. Finish setup before opening it in Rex.")
+        _require_ready(path)
         inventory = target.inspect(path)
         if record.exists():
             try:
@@ -188,8 +365,7 @@ def handoff(target: Target, path: Path, *, label: str) -> str:
                 _verify_focus(target, path, window, block)
                 return "Focused the existing Rex tab."
         STATE_ROOT.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # The tag is only recovery evidence. Normal reuse binds full IDs and live cwd.
-        title = f"{label} [{uuid.uuid4().hex[:12]}]"
+        title = _tab_title(label)
         workflow._save(record, {"label": title})
         try:
             reply = target.call(

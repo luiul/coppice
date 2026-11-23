@@ -108,7 +108,7 @@ The check supports direct integration and PR merges, including squash merges wit
 cop new --main-worktree                   # enter the original checkout, no app action
 cop new --branch experiment               # create or reuse a checkout without opening an app
 cop orca --branch fix-import              # open the task checkout and start or reuse Pi
-cop rex --branch fix-import               # open a shell tab in the calling Rex session
+cop rex --branch fix-import               # open a shell tab in the Git project's Rex session
 cop rex /path/to/repo --main-worktree --session session:<full-id>
 ```
 
@@ -118,7 +118,9 @@ All three commands take a repo path, which can be a subdirectory or linked workt
 
 `cop orca` registers the repo and makes external worktrees visible in the running app, including when you select the main worktree. It does not use Orca's native worktree creation. For the main worktree it activates the existing workspace without asking Orca to start Pi or submit a task. Orca may restore sessions according to its own settings.
 
-`cop rex` opens a shell, not Pi. Run it in a session on the local default Rex server or pass the full session ID from `rex session ls --json` for that server. It sets the active tab in that session; it does not switch the desktop app between sessions. Select the intended working session, not a dashboard session. Reuse checks Coppice's saved tab and pane IDs and the live terminal directory.
+`cop rex` opens a shell, not Pi. It uses one local Rex session per Git project from any terminal, including Ghostty or a different Rex session. The session takes the main worktree's directory name. Coppice uses the shared Git directory and the saved Rex session ID to distinguish clones. The first checkout opens as the first tab; later checkouts get their own tabs in that session.
+
+If an unrelated or unverified session has the same name, Coppice stops rather than reuse it. Use `--session` with a full ID from `rex session ls --json` to choose an existing session explicitly, or rename the other session in Rex. The override applies to that call only. Coppice sets the active tab on the Rex server but does not switch the desktop app between sessions. Select the project session in Rex if it is not already visible.
 
 If setup or app opening fails, the checkout stays on disk. The error gives a retry. A retry can finish pending setup without recreating the worktree. If Rex cannot confirm a tab creation or Orca cannot confirm a Pi launch, Coppice stops rather than create a duplicate.
 

@@ -296,7 +296,7 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
     elif case in {"setup-fail", "handoff-fail"}:
         assert f"Retry: cop {surface}" in result.output
         if surface == "rex":
-            assert "--session session:fixture" in result.output
+            assert "--session" not in result.output
         message = "A wt setup hook failed" if case == "setup-fail" else "handoff failed"
         assert message in result.output
 

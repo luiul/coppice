@@ -61,6 +61,33 @@ def resolve_repo_root(path: str | Path = ".") -> Path:
     return common_dir if is_bare else common_dir.parent
 
 
+def project_identity(path: Path) -> tuple[str, Path]:
+    """Return the original checkout's name and the shared Git directory."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+    def read(*args: str) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(path), *args],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RepoResolutionError("Cannot inspect Git project identity.") from exc
+        if result.returncode:
+            raise RepoResolutionError("Cannot inspect Git project identity.")
+        return result.stdout
+
+    root = read("worktree", "list", "--porcelain", "-z").split("\0", 1)[0]
+    common = Path(read("rev-parse", "--path-format=absolute", "--git-common-dir").rstrip("\n"))
+    if not root.startswith("worktree ") or not common.is_absolute():
+        raise RepoResolutionError("Git did not report a project name and common directory.")
+    name = Path(root.removeprefix("worktree ")).name
+    return name, common.resolve(strict=True)
+
+
 def main_worktree(path: str | Path) -> tuple[Path, str | None]:
     """Return Git's first registered checkout, not the default branch's path."""
     target = Path(path).expanduser()

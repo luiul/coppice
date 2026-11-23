@@ -271,7 +271,7 @@ def cmd_rex(
     base: Annotated[str | None, typer.Option("--base", "-B", help="Base branch/ref. Defaults to the repo's default branch.")] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation when the branch exists.")] = False,
     main_worktree: Annotated[bool, typer.Option("--main-worktree", help="Open the existing main worktree.")] = False,
-    session: Annotated[str | None, typer.Option("--session", help="Full local Rex session ID. Defaults to the calling Rex session.")] = None,
+    session: Annotated[str | None, typer.Option("--session", help="Full local Rex session ID. Defaults to the Git project's session.")] = None,
 ) -> None:
     """Open a shell tab in Rex after wt setup. Empty input opens the main worktree."""
     _create_worktree(path, branch, base, yes, main_worktree=main_worktree, surface="rex", session=session)
@@ -289,11 +289,8 @@ def _main_worktree(path: str, surface: str | None, session: str | None) -> None:
         raise _fail(str(exc)) from exc
 
     retry_path = str(target)
-    retry_session = session
     try:
         rex_target = rex.prepare(target, session) if surface == "rex" else None
-        if rex_target is not None:
-            retry_session = rex_target.session
         if repo.main_worktree(path) != (target, branch):
             raise workflow.HandoffError("The main worktree changed. Retry after checking its branch and path.")
         shell.write_cd_file(target)
@@ -303,7 +300,7 @@ def _main_worktree(path: str, surface: str | None, session: str | None) -> None:
             console.print(rex.handoff(rex_target, target, label=f"{target.name}: {branch or 'detached'}"), markup=False)
     except (repo.RepoResolutionError, workflow.HandoffError, OSError) as exc:
         if surface:
-            _print_open_retry(surface, retry_path, ["--main-worktree"], retry_session)
+            _print_open_retry(surface, retry_path, ["--main-worktree"], session)
         raise _fail(str(exc)) from exc
 
 
@@ -445,7 +442,6 @@ def _create_worktree(
             console.print(f"Worktree path: {checkout}\nWorktrunk expects: {expected}\nThe checkout is unchanged.", markup=False)
     console.print()
 
-    retry_session = rex_target.session if rex_target is not None else None
     if result_path:
         shell.write_cd_file(Path(result_path))
         if setup:
@@ -464,7 +460,7 @@ def _create_worktree(
                 console.print(message)
             except (workflow.HandoffError, OSError) as exc:
                 console.print(f"Worktree exists, but the {label} handoff failed: {exc}", markup=False)
-                _print_open_retry(surface, str(repo_root), ["--branch", branch, "--yes"], retry_session)
+                _print_open_retry(surface, str(repo_root), ["--branch", branch, "--yes"], session)
                 raise typer.Exit(1) from exc
 
 

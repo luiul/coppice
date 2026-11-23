@@ -137,8 +137,8 @@ def test_closed_verified_tab_can_be_reopened(server):
     assert state.creates == 2
 
 
-@pytest.mark.parametrize("session", [None, "not-an-id", "session:"])
-def test_requires_explicit_or_calling_session(monkeypatch, tmp_path, session):
+@pytest.mark.parametrize("session", ["not-an-id", "session:"])
+def test_explicit_session_requires_full_id(monkeypatch, tmp_path, session):
     monkeypatch.delenv("REX_SESSION", raising=False)
     monkeypatch.setattr(workflow, "manual_invocation", lambda: True)
     binary = Mock(side_effect=AssertionError("Unexpected executable lookup"))
