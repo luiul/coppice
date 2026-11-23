@@ -81,7 +81,7 @@ def test_existing_main_selection_preserves_dirty_index_and_branch(checkout, monk
         activate.assert_not_called()
     if command == "rex":
         prepare.assert_called_once_with(root.resolve(), None)
-        open_rex.assert_called_once_with(target, root.resolve(), label="main worktree: local-anchor")
+        open_rex.assert_called_once_with(target, root.resolve(), label="local-anchor")
     else:
         prepare.assert_not_called()
         open_rex.assert_not_called()
@@ -116,6 +116,18 @@ def test_detached_main_remains_detached(checkout):
     assert "Detached HEAD" in result.output
     assert not run_git(root, "branch", "--show-current")
     cd.assert_called_once_with(root.resolve())
+
+
+def test_detached_main_rex_tab_uses_detached_label(checkout, monkeypatch):
+    root, linked, _ = checkout
+    run_git(root, "switch", "--detach", "-q")
+    target = Mock()
+    monkeypatch.setattr(rex, "prepare", Mock(return_value=target))
+    open_rex = Mock(return_value="Opened Rex")
+    monkeypatch.setattr(rex, "handoff", open_rex)
+    result = runner.invoke(cli.app, ["rex", str(linked), "--main-worktree"])
+    assert result.exit_code == 0, result.output
+    open_rex.assert_called_once_with(target, root.resolve(), label="detached")
 
 
 def test_bare_has_no_main_worktree(tmp_path):

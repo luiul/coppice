@@ -297,7 +297,7 @@ def _main_worktree(path: str, surface: str | None, session: str | None) -> None:
         if surface == "orca":
             console.print(orca.activate_main(target), markup=False)
         elif rex_target is not None:
-            console.print(rex.handoff(rex_target, target, label=f"{target.name}: {branch or 'detached'}"), markup=False)
+            console.print(rex.handoff(rex_target, target, label=branch or "detached"), markup=False)
     except (repo.RepoResolutionError, workflow.HandoffError, OSError) as exc:
         if surface:
             _print_open_retry(surface, retry_path, ["--main-worktree"], session)
@@ -456,7 +456,7 @@ def _create_worktree(
                 else:
                     assert rex_target is not None
                     console.print("Opening a shell tab in Rex...")
-                    message = rex.handoff(rex_target, Path(result_path), label=f"{repo_root.name}: {branch}")
+                    message = rex.handoff(rex_target, Path(result_path), label=branch)
                 console.print(message)
             except (workflow.HandoffError, OSError) as exc:
                 console.print(f"Worktree exists, but the {label} handoff failed: {exc}", markup=False)

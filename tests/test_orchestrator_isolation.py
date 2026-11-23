@@ -251,7 +251,7 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
     def rex_open(target, checkout, *, label):
         assert target.session == "session:fixture"
         assert checkout == c.checkout
-        assert label.endswith(": probe")
+        assert label == "probe"
         if case == "handoff-fail":
             raise workflow.HandoffError("handoff failed")
         return "Opened a Rex tab"

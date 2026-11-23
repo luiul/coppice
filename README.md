@@ -118,7 +118,7 @@ All three commands take a repo path, which can be a subdirectory or linked workt
 
 `cop orca` registers the repo and makes external worktrees visible in the running app, including when you select the main worktree. It does not use Orca's native worktree creation. For the main worktree it activates the existing workspace without asking Orca to start Pi or submit a task. Orca may restore sessions according to its own settings.
 
-`cop rex` opens a shell, not Pi. It uses one local Rex session per Git project from any terminal, including Ghostty or a different Rex session. The session takes the main worktree's directory name. Coppice uses the shared Git directory and the saved Rex session ID to distinguish clones. The first checkout opens as the first tab; later checkouts get their own tabs in that session.
+`cop rex` opens a shell, not Pi. It uses one local Rex session per Git project from any terminal, including Ghostty or a different Rex session. The session takes the main worktree's directory name. Coppice uses the shared Git directory and the saved Rex session ID to distinguish clones. The first checkout opens as the first tab; later checkouts get their own tabs in that session. New tabs use the branch name and a short recovery suffix, without repeating the project name.
 
 If an unrelated or unverified session has the same name, Coppice stops rather than reuse it. Use `--session` with a full ID from `rex session ls --json` to choose an existing session explicitly, or rename the other session in Rex. The override applies to that call only. Coppice sets the active tab on the Rex server but does not switch the desktop app between sessions. Select the project session in Rex if it is not already visible.
 
