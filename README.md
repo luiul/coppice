@@ -64,11 +64,11 @@ Full reference, prompt behavior, and safety rails:
 
 ## Worktree listing
 
-`cop list` groups worktrees by repo. Wide terminals show tables. Narrow terminals show full labeled cards, with the same fields rather than dropped columns or combined status cells.
+`cop list` shows one row per worktree, grouped by repo, even on a narrow terminal. It shows the branch, local state, task state, remote integration, PR, and size. An asterisk marks the current worktree. Use `cop list --detail` for the full breakdown in wide tables or narrow cards.
 
-Each shown repo includes its main worktree as a row. `Main` means the original worktree from `git init` or `git clone`, not the default branch. `Linked` means an additional worktree. Branch and HEAD state are separate. Detached HEAD shows Branch `N/A` and HEAD state `Detached`. Current, Prunable, and Path mismatch also have separate fields. Repos with only a main worktree are hidden in the multi-repo view unless you pass `--all`. An explicit repo path shows its main worktree.
+Each shown repo includes its main worktree as a row. `Main` means the original worktree from `git init` or `git clone`, not the default branch. `Linked` means an additional worktree. Repos with only a main worktree are hidden in the multi-repo view unless you pass `--all`. An explicit repo path shows its main worktree.
 
-The display separates staged, unstaged, untracked, and unmerged path counts. It also separates directory creation, HEAD commit time, latest local file change, parked time, and follow-up. Missing time evidence shows `Unknown`, without a fallback to another time. Times use ISO format with the local UTC offset. `cop list -v` shows full paths and wraps them when needed. `--size/--no-size` keeps the existing disk-usage behavior.
+The detailed view separates branch and HEAD state, registration and path mismatch, and staged, unstaged, untracked, and unmerged path counts. It also separates directory creation, HEAD commit time, latest local file change, parked time, and follow-up. Missing time evidence shows `Unknown`. Times use ISO format with the local UTC offset. Use `cop list -v` for the detailed view with full, wrapped paths. `--size/--no-size` keeps the existing disk-usage behavior.
 
 Ahead, Behind, and HEAD contained use a named local ref, `refs/heads/<cached default name>`. The name comes from Worktrunk's cached default, with cached `origin/HEAD` as a fallback. It never comes from the main worktree's checked-out branch. Missing refs or shallow history show `Unknown`. Worktrunk's reported relation, content integration, integration method, predicted conflicts, and comparison target stay separate. Schema 1 does not name its exact target ref, so the target shows `Unknown`. Predicted conflicts needs explicit evidence for `Yes`; other compared states do not imply `No`. Those results do not prove local HEAD ancestry or permission to remove a checkout.
 
@@ -78,7 +78,7 @@ Run `cop list --explain` for a concise field glossary without a Git, `gh`, or `w
 
 ## PR visibility
 
-`cop list` shows PR lookup, PR state, PR number, and Additional PRs as separate fields. PR lookup does not depend on an open Orca tab. Collected branch rows use the GitHub repo named by `origin`.
+The compact PR column shows the selected PR, such as `Open #123`, and any count of other matches. `--detail` shows PR lookup, PR state, PR number, and Additional PRs separately. PR lookup does not depend on an open Orca tab. Collected branch rows use the GitHub repo named by `origin`.
 
 Lookup distinguishes `Complete`, `Unknown`, `N/A`, and `Not checked`. `Complete` with PR state `None` means no PR matches. State identifies the selected PR as Draft, Open, Merged, or Closed. Main display rows do not promise PR checks; a row without collected evidence shows `Not checked`.
 
@@ -88,7 +88,7 @@ Use `cop link-pr PATH` to attach the displayed PR to an existing Orca workspace.
 
 ## Remote default
 
-`cop list` also shows whether a checked worktree's current committed HEAD reached the fresh actual `origin` default branch. The repo metadata names the remote and default branch separately, with the observed remote commit and check time. Including the main worktree as a display row does not promise a remote check; uncollected rows show `Not checked`.
+`cop list` also shows whether a checked worktree's current committed HEAD reached the fresh actual `origin` default branch. The compact column is `Origin`. With `--detail`, repo metadata names the remote and default branch separately, with the observed remote commit and check time. The main worktree can appear without a remote check. Uncollected results show `-` in compact output and `Not checked` in detail.
 
 | Remote default cell | Meaning |
 |---|---|
@@ -158,7 +158,7 @@ exactly one of three operations:
 | **relocate** | a worktree's path | path-keyed tools | `cop relocate` |
 | **rename** | the branch ref | nothing on disk | `git branch -m` (coppice never does this) |
 
-A worktree at a path that does not match its checked-out branch shows a separate Path mismatch field in `cop list`. The Branch field still names the actual branch. How `cop new` recovers when it needs that path: [docs/recovery.md](docs/recovery.md). How `cop relocate` heals a mismatch afterwards: [docs/worktrees.md](docs/worktrees.md).
+A worktree at a path that does not match its checked-out branch shows `Mismatch` in `cop list`, with a separate Path mismatch field in `--detail`. The Branch field still names the actual branch. How `cop new` recovers when it needs that path: [docs/recovery.md](docs/recovery.md). How `cop relocate` heals a mismatch afterwards: [docs/worktrees.md](docs/worktrees.md).
 
 ### States
 

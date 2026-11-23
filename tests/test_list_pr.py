@@ -65,29 +65,17 @@ def test_list_default_pr_column(listing, width):
     before = copy.deepcopy(entries)
     result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": str(width)})
     assert result.exit_code == 0, result.output
-    assert all(label in result.stdout for label in ("PR lookup", "PR state", "PR number", "Additional PRs"))
-    assert "Complete" in result.stdout
-    if width == 80:
-        feature = result.stdout.split("Branch: feature", 1)[1].split("Branch: waiting", 1)[0]
-        waiting = result.stdout.split("Branch: waiting", 1)[1]
-        assert "PR lookup: Complete" in feature
-        assert "PR state: Open" in feature
-        assert "PR number: 123" in feature
-        assert "Additional PRs: 0" in feature
-        assert "PR lookup: Complete" in waiting
-        assert "PR state: None" in waiting
-        assert "PR number: N/A" in waiting
-    assert re.search(r"\bOpen\b", result.stdout)
-    assert re.search(r"\b123\b", result.stdout)
-    assert re.search(r"\bNone\b", result.stdout)
-    assert "Open #123" not in result.stdout
-    assert "feature" in result.stdout
+    feature = next(line for line in result.stdout.splitlines() if "feature" in line)
+    waiting = next(line for line in result.stdout.splitlines() if "waiting" in line)
+    assert "Linked" in feature and "Open #123" in feature
+    assert "Linked" in waiting and "No PR" in waiting
+    assert not any(label in result.stdout for label in ("PR lookup", "PR state", "PR number", "Additional PRs"))
     assert result.stderr == ""
     lookup.assert_called_once_with(root, {"feature", "waiting"})
     assert entries == before
 
 
-def test_list_pr_number_is_clickable_without_combined_cell(listing, monkeypatch):
+def test_compact_pr_number_is_clickable(listing, monkeypatch):
     monkeypatch.setattr(cli, "console", Console(width=80, force_terminal=True, legacy_windows=False, highlight=False))
     result = runner.invoke(cli.app, ["list", "--no-size"], color=True)
 
@@ -96,17 +84,14 @@ def test_list_pr_number_is_clickable_without_combined_cell(listing, monkeypatch)
     assert "\x1b]8;" in result.stdout
     plain = re.sub(r"\x1b\]8;[^\x1b]*\x1b\\", "", result.stdout)
     plain = re.sub(r"\x1b\[[0-9;]*m", "", plain)
-    assert "PR state: Open" in plain
-    assert "PR number: 123" in plain
-    assert "Additional PRs: 0" in plain
-    assert "Open #123" not in plain
+    assert "Open #123" in plain
 
 
 @pytest.mark.parametrize("status,label", [("unknown", "Unknown"), ("unsupported", "N/A")])
 def test_list_lookup_outcomes(listing, status, label):
     root, _, lookup = listing
     lookup.return_value = gh.PullRequestLookup(status, reason="gh not installed" if status == "unknown" else None)
-    result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "80"})
+    result = runner.invoke(cli.app, ["list", "--detail", "--no-size"], env={"COLUMNS": "80"})
     assert result.exit_code == 0, result.output
     feature = result.stdout.split("Branch: feature", 1)[1].split("Branch: waiting", 1)[0]
     assert f"PR lookup: {label}" in feature
@@ -130,7 +115,7 @@ def test_no_pr_omits_column_and_all_lookup(listing):
     lookup.assert_not_called()
 
 
-@pytest.mark.parametrize("flags", [[], ["--no-pr"], ["--pr"]])
+@pytest.mark.parametrize("flags", [[], ["--no-pr"], ["--pr"], ["--detail"]])
 def test_json_has_no_pr_lookup_or_new_fields(listing, flags):
     _, entries, lookup = listing
     result = runner.invoke(cli.app, ["list", "--json", *flags])
@@ -161,7 +146,7 @@ def test_stale_branch_still_has_pr_and_detached_is_not_queried(listing):
     root, entries, lookup = listing
     entries[1]["worktree"]["state"] = "prunable"
     entries[2]["branch"] = None
-    result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "160"})
+    result = runner.invoke(cli.app, ["list", "--detail", "--no-size"], env={"COLUMNS": "160"})
     assert result.exit_code == 0, result.output
     assert re.search(r"\bOpen\b", result.stdout)
     assert re.search(r"\b123\b", result.stdout)
@@ -174,7 +159,7 @@ def test_stale_branch_still_has_pr_and_detached_is_not_queried(listing):
 def test_empty_and_main_only_repos_skip_lookup(listing):
     _, entries, lookup = listing
     entries[:] = entries[:1]
-    result = runner.invoke(cli.app, ["list", "--all", "--no-size"])
+    result = runner.invoke(cli.app, ["list", "--detail", "--all", "--no-size"])
     assert result.exit_code == 0, result.output
     assert "Worktree type: Main" in result.stdout
     assert "PR lookup: Not checked" in result.stdout
@@ -207,7 +192,7 @@ def test_repo_scoped_matching_and_empty_section_alignment(listing, monkeypatch):
             "feature": (gh.PullRequest(123 if path == root else 456, f"https://github.com/owner/{path.name}/pull/1"),),
         },
     )
-    result = runner.invoke(cli.app, ["list", "--no-size", "--all"], env={"COLUMNS": "160"})
+    result = runner.invoke(cli.app, ["list", "--detail", "--no-size", "--all"], env={"COLUMNS": "160"})
     assert result.exit_code == 0, result.output
     assert re.search(r"\b123\b", result.stdout) and re.search(r"\b456\b", result.stdout)
     assert result.stdout.count("Pull requests") == 3
@@ -272,10 +257,8 @@ def test_pr_detail_includes_each_url_and_state(listing):
     result = runner.invoke(cli.app, ["list", "--no-size", "--pr-detail"], env={"COLUMNS": "160"})
     assert result.exit_code == 0, result.output
     overview, _details = result.stdout.split("repo / feature:", 1)
-    assert "PR state" in overview and "Draft" in overview
-    assert "PR number" in overview and re.search(r"\b7\b", overview)
-    assert "Additional PRs" in overview and re.search(r"\b1\b", overview)
-    assert "Draft #7 +1" not in overview
+    assert "Draft #7 +1" in overview
+    assert "PR state" not in overview
     assert "repo / feature: Draft #7 https://github.com/owner/repo/pull/7" in result.stdout
     assert "repo / feature: Merged #6 https://github.com/owner/repo/pull/6" in result.stdout
 
@@ -333,7 +316,7 @@ def test_new_preview_table_unchanged(listing, monkeypatch):
 
 @pytest.mark.parametrize("width", [80, 120, 200])
 @pytest.mark.parametrize("count", [1, 6])
-def test_default_size_layout_multiple_long_pr_numbers(listing, monkeypatch, width, count):
+def test_detail_size_layout_multiple_long_pr_numbers(listing, monkeypatch, width, count):
     _, entries, lookup = listing
     entries[1]["branch"] = "feature/verify-open-pr-status"
     monkeypatch.setattr(cli.sizes, "dir_sizes_kb", lambda paths, **kwargs: {Path(w["path"]): 10 for w in entries})
@@ -345,7 +328,7 @@ def test_default_size_layout_multiple_long_pr_numbers(listing, monkeypatch, widt
             ),
         },
     )
-    result = runner.invoke(cli.app, ["list"], env={"COLUMNS": str(width)})
+    result = runner.invoke(cli.app, ["list", "--detail"], env={"COLUMNS": str(width)})
     assert result.exit_code == 0, result.output
     assert "PR number" in result.stdout
     assert re.search(r"\b1234567\b", result.stdout)

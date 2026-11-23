@@ -64,10 +64,7 @@ named after the repo, `dbt-models`. Someone later runs
 `git switch spike-other` inside it, works there for a while, then
 parks the task with `cop park` and moves on. The path's branch
 segment still says `fix-thing` while the checkout serves the branch
-`spike-other`,
-so `cop list` flags the row as `spike-other @ fix-thing/`: the row's
-branch is the checked-out one, and the `@ .../` part is the parent
-directory's name. The relocate moves the directory to
+`spike-other`. `cop list` shows `spike-other` as the branch and flags the row as `Mismatch`. Use `cop list -v` to see the full path. The relocate moves the directory to
 `~/worktrees/acme/spike-other/dbt-models`, the expected path of the
 branch actually checked out there, and updates
 git's worktree metadata to match. Branch segment and branch agree

@@ -80,7 +80,7 @@ def listing(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("width", [80, 120, 200])
-def test_default_column_and_independent_states(listing, width, monkeypatch):
+def test_detail_columns_and_independent_states(listing, width, monkeypatch):
     root, rows, lookup, pr_lookup, check = listing
     before = copy.deepcopy(rows)
     local = cli.list_facts.RepoFacts(
@@ -112,7 +112,7 @@ def test_default_column_and_independent_states(listing, width, monkeypatch):
         target_source="cached config",
     )
     monkeypatch.setattr(cli.list_facts, "collect_many", Mock(return_value={root: local}))
-    result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": str(width)})
+    result = runner.invoke(cli.app, ["list", "--detail", "--no-size"], env={"COLUMNS": str(width)})
     assert result.exit_code == 0, result.output
     assert "Reached" in result.stdout and "Pending" in result.stdout
     assert "HEAD integration" in result.stdout
@@ -172,10 +172,11 @@ def test_independent_opt_outs(listing, flags, remote_calls, pr_calls):
     assert lookup.call_count == remote_calls and pr_lookup.call_count == pr_calls
     assert check.call_count == remote_calls
     assert ("Reached" in result.stdout) == bool(remote_calls)
-    assert ("PR state" in result.stdout and re.search(r"\bMerged\b", result.stdout) is not None) == bool(pr_calls)
-    assert ("Remote default branch" in result.stdout) == bool(remote_calls)
-    assert ("HEAD integration" in result.stdout) == bool(remote_calls)
-    assert ("PR lookup" in result.stdout) == bool(pr_calls)
+    assert (" Merged #123" in result.stdout) == bool(pr_calls)
+    headers = next(line.split() for line in result.stdout.splitlines() if line.startswith("Type"))
+    assert ("Origin" in headers) == bool(remote_calls)
+    assert ("PR" in headers) == bool(pr_calls)
+    assert "Size" not in headers
     cli.list_facts.collect_many.assert_called_once()
     cli.list_facts.revalidate_many.assert_called_once()
 
@@ -215,16 +216,12 @@ def test_remote_evidence_requires_matching_local_snapshot(listing, monkeypatch, 
     result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
+    feature = next(line for line in result.stdout.splitlines() if line.strip().startswith("Linked"))
     if identity == "failed-snapshot":
-        feature = result.stdout.split("HEAD commit: Unknown", 1)[1].split("Branch: waiting", 1)[0]
-        assert "Branch: Unknown" in result.stdout
-        assert "PR lookup: Unknown" in feature
-        assert "PR state: Unknown" in feature
+        assert "feature" not in feature and "Merged #123" not in feature
     else:
-        feature = result.stdout.split("Branch: feature", 1)[1].split("Branch: waiting", 1)[0]
-        assert "PR state: Merged" in feature
-    assert "HEAD integration: Unknown" in feature
-    assert "HEAD integration: Reached" not in feature
+        assert "feature" in feature and "Merged #123" in feature
+    assert "Unknown" in feature and "Reached" not in feature
 
 
 def test_unknown_warns_and_preserves_listing(listing):
@@ -233,8 +230,7 @@ def test_unknown_warns_and_preserves_listing(listing):
     result = runner.invoke(cli.app, ["list", "--no-size"], env={"COLUMNS": "160"})
     assert result.exit_code == 0 and "Unknown" in result.stdout
     assert "Remote default unavailable for repo: offline" in result.stderr
-    assert "PR state" in result.stdout and re.search(r"\bMerged\b", result.stdout)
-    assert "PR number" in result.stdout and re.search(r"\b123\b", result.stdout)
+    assert "Merged #123" in result.stdout
 
 
 @pytest.mark.parametrize(
@@ -280,7 +276,7 @@ def test_size_verbose_and_section_alignment(listing, monkeypatch):
 def test_main_only_repo_is_displayed_without_remote_or_pr_collection(listing):
     _, rows, lookup, pr_lookup, check = listing
     rows[:] = rows[:1]
-    result = runner.invoke(cli.app, ["list", "--no-size"])
+    result = runner.invoke(cli.app, ["list", "--detail", "--no-size"])
     assert result.exit_code == 0, result.output
     assert "Worktree type: Main" in result.stdout
     assert "HEAD integration: Not checked" in result.stdout

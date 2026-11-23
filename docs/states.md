@@ -1,10 +1,10 @@
 # Worktree facts, task state, and integration evidence
 
-Git facts, Coppice task state, and Worktrunk results answer different questions. [The glossary](glossary.md) defines their terms. The human `cop list` display keeps them separate instead of putting them in one status or Merge cell.
+Git facts, Coppice task state, and Worktrunk results answer different questions. [The glossary](glossary.md) defines their terms. The `cop list` view summarizes the main signals. Use `--detail` to see each fact separately.
 
 ## Git status and registration
 
-- **Dirty**: the worktree has uncommitted changes. Staged, unstaged, untracked, and unmerged path counts are separate in `cop list`. Deleted and renamed paths can contribute to these counts. A path can appear in more than one category. Rename detection is disabled, so old and new paths count separately. The existing `clean` dirty check and `remove --force` policy do not change.
+- **Dirty**: the worktree has uncommitted changes. Staged, unstaged, untracked, and unmerged path counts are separate in `cop list --detail`. Deleted and renamed paths can contribute to these counts. A path can appear in more than one category. Rename detection is disabled, so old and new paths count separately. The existing `clean` dirty check and `remove --force` policy do not change.
 - **Stale**: Git still has a worktree registration, usually after its directory was removed outside Coppice or Worktrunk. Git calls a registration eligible for pruning `prunable`. Coppice shows prunable records as stale references, not clean worktrees. Its existing cleanup sweeps these records regardless of age or `--merged`.
 
 Worktree type, Current, Branch, HEAD state, HEAD commit, Prunable, and Path mismatch are separate fields. `Main` means the original worktree from `git init` or `git clone`, not a default branch. `Linked` means an additional worktree. Either can use detached HEAD, shown as HEAD state `Detached` with Branch `N/A`. A path mismatch is Worktrunk's report about its path template, not a change to the branch name.
@@ -13,7 +13,7 @@ Worktree type, Current, Branch, HEAD state, HEAD commit, Prunable, and Path mism
 
 **Parked** (`cop park`) means a task is complete but its worktree stays on disk for follow-up, such as review comments or a hotfix. This is Coppice task state, not Git status. The mark is a `branch.<branch>.parked-at` timestamp in the repo's local Git config. It does not dirty the working tree and dies with the branch.
 
-`cop list` shows Parked, Parked at, and Follow-up as separate fields. The Parked field records whether the mark is present, even when Follow-up makes the task active again. `cop sync` skips effectively parked worktrees. `cop remove` and ordinary `cop clean` refuse them until `cop unpark`. The existing sweep path is `cop clean --parked`, which selects worktrees parked a week or more ago, subject to its other checks.
+`cop list --detail` shows Parked, Parked at, and Follow-up as separate fields. The Parked field records whether the mark is present, even when Follow-up makes the task active again. `cop sync` skips effectively parked worktrees. `cop remove` and ordinary `cop clean` refuse them until `cop unpark`. The existing sweep path is `cop clean --parked`, which selects worktrees parked a week or more ago, subject to its other checks.
 
 The existing follow-up rule is a commit-time heuristic: if HEAD's reported commit timestamp is newer than the parked mark, the worktree reads as active again. The mark stays in config. An unknown HEAD timestamp does not disprove the mark, so the worktree stays parked. This is not a comparison with the HEAD identity at parking time. A changed HEAD with an older timestamp, or uncommitted edits alone, need not trigger Follow-up. The display does not change this shared heuristic. Use `cop unpark` to make the task active explicitly.
 
@@ -54,7 +54,7 @@ Tracking remote, Tracking branch, Tracking ahead, and Tracking behind display Wo
 
 Remote default checks the current committed HEAD against the fresh actual default branch of `origin`. Direct ancestry can prove `Reached`. Exact merged-PR evidence can also prove integration when the original HEAD matches and its merge commit is reachable from the observed remote default. New commits do not inherit an older PR's result. Dirty edits are independent of this check.
 
-PR history still matches by repo and branch name. PR lookup, PR state, PR number, and Additional PRs are separate fields. Reused branch names can match older PRs. `--pr-detail` prints every match with its full URL. Historical PR state is not proof that the current HEAD reached the remote default.
+PR history still matches by repo and branch name. PR lookup, PR state, PR number, and Additional PRs are separate fields in `--detail`. Reused branch names can match older PRs. `--pr-detail` prints every match with its full URL. Historical PR state is not proof that the current HEAD reached the remote default.
 
 Main worktrees are display rows, not a promise of new GitHub checks. A row without collected remote-default or PR evidence shows `Not checked`, not an invented result. `Unknown` means needed evidence is missing or incomplete. `N/A` means a check does not apply.
 

@@ -36,11 +36,11 @@ Official references: [Git worktree](https://git-scm.com/docs/git-worktree), [Git
 | Scope | The repos a command lists or changes. An explicit repo path selects one repo. An omitted path uses known repos and the current repo. |
 | Worktree type | `Main` or `Linked`, using Git's worktree terms. It does not identify a default branch. |
 | Current | Whether the caller's resolved worktree root matches this worktree. Nested worktrees use exact root identity, not path-prefix matching. |
-| Branch | The checked-out branch name, or `N/A` for detached HEAD. |
+| Branch | The checked-out branch name. The compact view shows detached HEAD directly. The detailed view uses `N/A` for Branch and `Detached` for HEAD state. |
 | HEAD state | `Attached` when HEAD names a branch, `Detached` when it points directly to a commit. |
 | Worktree ID | A separate display identifier, such as `W1`, repeated across the repository's tables and collection issues. It is not a branch or Git ref. |
 | HEAD commit | The current committed HEAD identity. |
-| Path | The worktree directory. Sessions, terminals, and editors attach to this path, not to a branch name. `cop list -v` shows the full path without truncation and wraps it when needed. The home directory can appear as `~`. |
+| Path | The worktree directory. Sessions, terminals, and editors attach to this path, not to a branch name. `cop list -v` shows the detailed view with full paths and wraps them when needed. The home directory can appear as `~`. |
 | Prunable | Whether the reported worktree registration is eligible for pruning. Prunable entries do not get assumed clean status or invented filesystem facts. |
 | Path mismatch | Worktrunk reports that the actual directory does not match its expected path for the checked-out branch. It is separate from Branch. |
 | Staged paths | The count of staged paths, relative to HEAD. |
@@ -74,7 +74,7 @@ Official references: [Git worktree](https://git-scm.com/docs/git-worktree), [Git
 | PR number | The selected PR number, shown separately from state. |
 | Additional PRs | The count of other PRs matching the same repo and branch name. `--pr-detail` prints all matches with full URLs. |
 | Unknown | A value needs evidence that is missing, incomplete, or failed. It does not mean zero, clean, contained, or safe to remove. |
-| Not checked | No result was collected for this row. Main display rows do not imply extra remote-default or PR checks. |
+| Not checked | No result was collected for this row. The compact `Origin` and `PR` columns show `-`. Main display rows do not imply extra remote default or PR checks. |
 | N/A | The check does not apply, such as a PR lookup for detached HEAD. |
 | Explain | `cop list --explain` prints a concise field glossary without a Git, `gh`, or `wt` scan. |
 

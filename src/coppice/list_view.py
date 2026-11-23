@@ -1,8 +1,4 @@
-"""Atomic worktree overview fields with table and stacked presentations.
-
-One registry drives both layouts and the explanation, so a narrow terminal
-never loses facts and terminology does not drift between views.
-"""
+"""Compact and detailed views of the same worktree facts."""
 
 from __future__ import annotations
 
@@ -12,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from rich import box
+from rich.cells import cell_len
 from rich.console import Console
 from rich.table import Table
 from rich.text import Text
@@ -338,6 +335,10 @@ def _metadata(console: Console, label: str, cell: Cell) -> None:
 def explain(console: Console) -> None:
     console.print("cop list overview", style="bold")
     console.print(
+        "The compact view marks the current worktree with *. Origin shows HEAD integration. "
+        "A dash means not checked; N/A means not applicable. Use --detail for the full field breakdown."
+    )
+    console.print(
         "Unknown: the fact could not be established. N/A: it does not apply. Not checked: collection was skipped."
     )
     console.print(
@@ -358,6 +359,110 @@ def explain(console: Console) -> None:
     console.print("Parked and follow-up are Coppice task facts. Integration reports do not grant removal permission.")
 
 
+def _compact_local(values: dict[str, Cell]) -> Cell:
+    if values["Prunable"].text == "Yes":
+        return Cell("Stale", "bold red")
+    counts = [values[f"{kind} paths"].text for kind in ("Unmerged", "Staged", "Unstaged", "Untracked")]
+    if counts[0].isdigit() and int(counts[0]) > 0:
+        return Cell("Conflict", "red")
+    if values["Git operation"].text not in {"None reported", NA.text}:
+        return values["Git operation"]
+    if any(count.isdigit() and int(count) > 0 for count in counts):
+        return Cell("Dirty", "yellow")
+    return Cell("Clean", "dim") if all(count == "0" for count in counts) else UNKNOWN
+
+
+def _compact_task(values: dict[str, Cell]) -> Cell:
+    if values["Path mismatch"].text == "Yes":
+        return Cell("Mismatch", "magenta")
+    if values["Parked"].text == "Yes":
+        follow_up = values["Follow-up"]
+        if follow_up.text == "Yes":
+            return Cell("Follow-up", "cyan")
+        return Cell("Parked?" if follow_up == UNKNOWN else "Parked", "blue")
+    return Cell("", "dim")
+
+
+def _compact_pr(values: dict[str, Cell]) -> Text:
+    lookup, state, number = (values[f"PR {field}"] for field in ("lookup", "state", "number"))
+    if lookup != Cell("Complete", "dim"):
+        return Text("-", style="dim") if lookup == NOT_CHECKED else lookup.rich()
+    if number == NA:
+        return Text("No PR", style="dim")
+    text = state.rich()
+    text.append(f" #{number.text}", style=number.style)
+    extra = values["Additional PRs"].text
+    if extra != "0":
+        text.append(f" +{extra}", style="dim")
+    return text
+
+
+def _render_compact(
+    console: Console,
+    rows: list[tuple[str, dict[str, Any], dict[str, Cell]]],
+    *,
+    show_size: bool,
+    show_pr: bool,
+    show_remote: bool,
+) -> None:
+    show_relation = console.width >= 110
+    headers = ["Type", "Branch", "Local", "Task"]
+    if show_relation:
+        headers.append("WT relation")
+    if show_remote:
+        headers.append("Origin")
+    if show_pr:
+        headers.append("PR")
+    if show_size:
+        headers.append("Size")
+
+    rendered_rows = []
+    for _, entry, values in rows:
+        current = values["Current"].text == "Yes"
+        stale = values["Prunable"].text == "Yes"
+        branch = values["Branch"].text
+        if stale and entry.get("branch"):
+            # This is the dangling registration's name, not a live checkout.
+            branch = entry["branch"]
+        elif values["HEAD state"].text == "Detached":
+            head = values["HEAD commit"].text
+            branch = "(detached)" if head == UNKNOWN.text else f"(detached {head})"
+        cells = [
+            Text(("*" if current else " ") + values["Worktree type"].text, style="bold green" if current else ""),
+            Text(branch, style="bold red" if stale else values["Branch"].style),
+            _compact_local(values).rich(),
+            _compact_task(values).rich(),
+        ]
+        if show_relation:
+            cells.append(values["Reported relation"].rich())
+        if show_remote:
+            integration = values["HEAD integration"]
+            cells.append(Cell("-", "dim").rich() if integration == NOT_CHECKED else integration.rich())
+        if show_pr:
+            cells.append(_compact_pr(values))
+        if show_size:
+            cells.append(values["Disk usage"].rich())
+        rendered_rows.append(cells)
+
+    # Reserve room for state before clipping branch names. Otherwise Rich can
+    # shrink every column, even short labels such as Linked and Reached.
+    widths = [max(cell_len(header), *(row[i].cell_len for row in rendered_rows)) for i, header in enumerate(headers)]
+    other_width = sum(widths) - widths[1] + len(headers) - 1
+    widths[1] = min(widths[1], max(len("Branch"), console.width - other_width))
+    table = Table(box=box.SIMPLE_HEAVY, pad_edge=False, show_edge=False, padding=0)
+    for header, width in zip(headers, widths, strict=True):
+        table.add_column(
+            header, width=width, no_wrap=True, overflow="ellipsis", justify="right" if header == "Size" else "left"
+        )
+    for cells in rendered_rows:
+        for cell in cells:
+            cell.no_wrap = True
+            cell.overflow = "ellipsis"
+        table.add_row(*cells)
+    console.print(table)
+    console.print()
+
+
 def render(
     console: Console,
     repos: list[Path],
@@ -367,12 +472,14 @@ def render(
     show_all: bool,
     show_size: bool,
     verbose: bool,
+    detail: bool,
     size_cache: dict[Path, int] | None,
     pr_lookups: dict[Path, gh.PullRequestLookup] | None,
     remote_lookups: dict[Path, remote_default.RemoteDefaultLookup] | None,
     current_path: str | None = None,
 ) -> None:
     main_count = linked_count = hidden = 0
+    detailed = detail or verbose
     for root in sorted(repos, key=lambda value: value.name.lower()):
         rows = entries.get(root, [])
         if len(repos) > 1 and not show_all and not any(not row.get("is_main") for row in rows):
@@ -381,27 +488,34 @@ def render(
         main_count += sum(bool(row.get("is_main")) for row in rows)
         linked_count += sum(not row.get("is_main") for row in rows)
         console.print(Text(root.name, style="bold"))
-        _metadata(console, "Repository path", Cell(_path(str(root))))
         local = facts.get(root)
         pr = (pr_lookups or {}).get(root)
         remote = (remote_lookups or {}).get(root)
-        _metadata(console, "Local comparison branch", Cell(local.target_ref) if local and local.target_ref else UNKNOWN)
-        _metadata(
-            console, "Local target selection", Cell(local.target_source) if local and local.target_source else UNKNOWN
-        )
-        _metadata(
-            console, "Local target commit", Cell(local.target_sha[:12]) if local and local.target_sha else UNKNOWN
-        )
-        _metadata(console, "Worktrunk comparison target", UNKNOWN)
-        if remote_lookups is not None:
-            _metadata(console, "Remote name", Cell("origin"))
-            _metadata(console, "Remote default branch", Cell(remote.branch) if remote and remote.branch else UNKNOWN)
+        if detailed:
+            _metadata(console, "Repository path", Cell(_path(str(root))))
+            _metadata(
+                console, "Local comparison branch", Cell(local.target_ref) if local and local.target_ref else UNKNOWN
+            )
             _metadata(
                 console,
-                "Observed remote commit",
-                Cell(remote.remote_sha[:12]) if remote and remote.remote_sha else UNKNOWN,
+                "Local target selection",
+                Cell(local.target_source) if local and local.target_source else UNKNOWN,
             )
-            _metadata(console, "Remote checked at", _time(remote.checked_at if remote else None))
+            _metadata(
+                console, "Local target commit", Cell(local.target_sha[:12]) if local and local.target_sha else UNKNOWN
+            )
+            _metadata(console, "Worktrunk comparison target", UNKNOWN)
+            if remote_lookups is not None:
+                _metadata(console, "Remote name", Cell("origin"))
+                _metadata(
+                    console, "Remote default branch", Cell(remote.branch) if remote and remote.branch else UNKNOWN
+                )
+                _metadata(
+                    console,
+                    "Observed remote commit",
+                    Cell(remote.remote_sha[:12]) if remote and remote.remote_sha else UNKNOWN,
+                )
+                _metadata(console, "Remote checked at", _time(remote.checked_at if remote else None))
         if not rows:
             console.print("No worktree records available.", style="yellow")
             console.print()
@@ -422,7 +536,7 @@ def render(
                 _fields(
                     row,
                     local.rows.get(row.get("path", "")) if local else None,
-                    (pr_lookups or {}).get(root),
+                    pr,
                     remote,
                     size_cache,
                     current_path,
@@ -430,6 +544,15 @@ def render(
             )
             for i, row in enumerate(ordered)
         ]
+        if not detailed:
+            _render_compact(
+                console,
+                row_values,
+                show_size=show_size,
+                show_pr=pr_lookups is not None,
+                show_remote=remote_lookups is not None,
+            )
+            continue
         groups = []
         for title, fields in GROUPS:
             chosen = tuple(
@@ -490,4 +613,7 @@ def render(
     console.print(f"Linked worktrees: {linked_count}")
     if hidden:
         console.print(f"Hidden repositories without linked worktrees: {hidden}. Use --all to show them.", style="dim")
-    console.print("Use cop list --explain for field definitions.", style="dim")
+    if detailed:
+        console.print("Use cop list --explain for field definitions.", style="dim")
+    else:
+        console.print("Use --detail for all fields or --explain for definitions.", style="dim")

@@ -7,18 +7,25 @@ Worktree branch: add-customer-id-column
 Created worktree for add-customer-id-column @ /Users/you/dbt-models/.worktrees/add-customer-id-column
 
 $ cop list
-Branch                      Created   Modified   Size    Working tree   Merge
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-airflow-dags (main: master)
-  update-dag-schedule           1d        20h    312M    clean          merged
-  debug-failing-pipeline        1w         3d    298M    dirty          unmerged
 
-dbt-models (main: main)
-  add-customer-id-column        2d        2d    1.1G    clean          unmerged
-  fix-ingestion-retry           5d        1w    1.0G    clean          merged
+airflow-dags
+Type    Branch                 Local Task Origin  PR           Size
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Main   master                 Clean      -       -            410M
+ Linked debug-failing-pipeline  Dirty      Pending Open #123    298M
+ Linked update-dag-schedule    Clean      Reached Merged #101  312M
 
-4 worktrees in 2 repos · 2.7G on disk · 2 merged (cop clean --merged) · 1 dirty.
-5 more repos with no extra worktrees (show with: cop list --all)
+dbt-models
+Type    Branch                 Local Task Origin  PR        Size
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+ Main   main                   Clean      -       -         1.2G
+*Linked add-customer-id-column Clean      Pending Draft #45 1.1G
+ Linked fix-ingestion-retry    Clean      Reached No PR     1.0G
+
+Main worktrees: 2
+Linked worktrees: 4
+Hidden repositories without linked worktrees: 5. Use --all to show them.
+Use --detail for all fields or --explain for definitions.
 
 $ cop clean --dry-run
 Scanning 2 repos for worktrees older than 14d...

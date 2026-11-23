@@ -69,7 +69,7 @@ def sample():
     return root, rows, repo_facts, pr, remote
 
 
-def output(width=120, *, verbose=False, show_size=False, pr_enabled=True, remote_enabled=True):
+def output(width=120, *, detail=True, verbose=False, show_size=False, pr_enabled=True, remote_enabled=True):
     root, rows, facts, pr, remote = sample()
     console = Console(width=width, highlight=False, force_terminal=False)
     with console.capture() as capture:
@@ -81,6 +81,8 @@ def output(width=120, *, verbose=False, show_size=False, pr_enabled=True, remote
             show_all=False,
             show_size=show_size,
             verbose=verbose,
+            detail=detail,
+            current_path="/feature",
             size_cache={Path("/repo"): 1, Path("/feature"): 2},
             pr_lookups={root: pr} if pr_enabled else None,
             remote_lookups={root: remote} if remote_enabled else None,
@@ -89,7 +91,45 @@ def output(width=120, *, verbose=False, show_size=False, pr_enabled=True, remote
 
 
 @pytest.mark.parametrize("width", [80, 120, 200])
-def test_same_atomic_values_in_each_layout(width):
+def test_compact_shows_one_row_per_worktree(width):
+    lines = output(width, detail=False, show_size=True).splitlines()
+    headings = next(line.split() for line in lines if line.lstrip().startswith("Type"))
+    main, feature = [
+        line
+        for line in lines
+        if line.lstrip().startswith(("Main ", "*Linked ")) and not line.startswith("Main worktrees:")
+    ]
+    assert "repo" in lines
+    assert "topic-not-default" in main and "Conflict" in main
+    assert ("feature/very-long-atomic…" if width == 80 else "feature/very-long-atomic-name") in feature
+    assert all(value in feature for value in ("Conflict", "Follow-up", "Reached", "Merged #123 +1", "2K"))
+    assert {"Type", "Branch", "Local", "Task", "Origin", "PR", "Size"} <= set(headings)
+    assert ("WT" in headings) == (width >= 110)
+    assert "Checkout" not in lines and "W1" not in lines
+    assert max(map(len, lines)) <= width
+
+
+@pytest.mark.parametrize(
+    "counts,operation,expected",
+    [
+        (("0", "0", "0", "0"), "None reported", "Clean"),
+        (("0", "0", "Unknown", "0"), "None reported", "Unknown"),
+        (("2", "Unknown", "0", "0"), "None reported", "Dirty"),
+        (("0", "0", "0", "0"), "rebase", "rebase"),
+        (("0", "0", "0", "1"), "None reported", "Conflict"),
+    ],
+)
+def test_compact_local_summary_does_not_assume_missing_counts_are_zero(counts, operation, expected):
+    values = {
+        f"{kind} paths": list_view.Cell(count)
+        for kind, count in zip(("Staged", "Unstaged", "Untracked", "Unmerged"), counts, strict=True)
+    }
+    values.update({"Prunable": list_view.Cell("No"), "Git operation": list_view.Cell(operation)})
+    assert list_view._compact_local(values).text == expected
+
+
+@pytest.mark.parametrize("width", [80, 120, 200])
+def test_same_atomic_values_in_each_detail_layout(width):
     text = output(width)
     assert "main: main" not in text
     assert "topic-not-default" in text
@@ -134,6 +174,7 @@ def test_complete_long_path_wraps_not_ellipsized():
             show_all=False,
             show_size=False,
             verbose=True,
+            detail=True,
             size_cache=None,
             pr_lookups=None,
             remote_lookups=None,
@@ -187,6 +228,7 @@ def test_render_preserves_inputs_and_never_collects(monkeypatch):
             show_all=False,
             show_size=False,
             verbose=False,
+            detail=False,
             size_cache=None,
             pr_lookups={root: pr},
             remote_lookups={root: remote},
@@ -247,6 +289,7 @@ def test_wide_repeated_branch_never_revives_invalid_identity():
             show_all=False,
             show_size=False,
             verbose=False,
+            detail=True,
             size_cache=None,
             pr_lookups={root: pr},
             remote_lookups={root: remote},

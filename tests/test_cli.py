@@ -917,7 +917,7 @@ def test_list_flags_stale_worktrees(tmp_path, monkeypatch):
     ]
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"])
+    result = runner.invoke(app, ["list", str(repo_dir), "--detail", "--no-size"])
 
     assert result.exit_code == 0, result.output
     assert "Branch: stale-branch" in result.output
@@ -967,7 +967,7 @@ def test_list_summary_has_no_cleanup_or_relocation_hints(tmp_path, monkeypatch):
 
     assert result.exit_code == 0, result.output
     flat = result.output.replace("\n", "")
-    assert "Path mismatch" in flat
+    assert "Mismatch" in flat
     assert "Main worktrees: 1" in flat
     assert "Linked worktrees: 1" in flat
     assert "cop relocate" not in flat
@@ -1239,7 +1239,7 @@ def test_list_uncollected_local_facts_are_unknown(tmp_path, monkeypatch):
     monkeypatch.setattr(wt, "require_wt", lambda: None)
     monkeypatch.setattr(wt, "list_worktrees_many", lambda _roots: {root: entries})
 
-    result = runner.invoke(app, ["list", "--no-size", "--no-pr", "--no-remote-default"])
+    result = runner.invoke(app, ["list", "--detail", "--no-size", "--no-pr", "--no-remote-default"])
 
     assert result.exit_code == 0, result.output
     feature = result.output.split("Branch: feature", 1)[1]
@@ -1275,8 +1275,9 @@ def test_list_main_only_checkout_has_a_row(tmp_path, monkeypatch, scope):
     result = runner.invoke(app, ["list", *args, "--no-size", "--no-pr", "--no-remote-default"])
 
     assert result.exit_code == 0, result.output
-    assert "Worktree type: Main" in result.output
-    assert "Branch: topic-not-default" in result.output
+    row = next(line for line in result.stdout.splitlines() if "topic-not-default" in line)
+    assert row.split()[:2] == ["Main", "topic-not-default"]
+    assert "Checkout" not in result.stdout
     assert "Main worktrees: 1" in result.output
     assert "Linked worktrees: 0" in result.output
     assert "Hidden repositories" not in result.output
@@ -1307,9 +1308,18 @@ def test_list_current_uses_callers_directory_not_worktrunk_query_root(tmp_path, 
     caller.assert_called_once()
     assert caller.call_args.args[0] == ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"]
     assert caller.call_args.kwargs["timeout"] == 5
-    main, feature = result.output.split("W2\n", 1)
-    assert f"Current: {'Yes' if location == 'main' else 'No'}" in main
-    assert f"Current: {'Yes' if location == 'linked-subdirectory' else 'No'}" in feature
+    main = next(
+        line.lstrip()
+        for line in result.stdout.splitlines()
+        if line.lstrip().startswith(("Main ", "*Main ")) and not line.startswith("Main worktrees:")
+    )
+    feature = next(
+        line.lstrip()
+        for line in result.stdout.splitlines()
+        if line.lstrip().startswith(("Linked ", "*Linked ")) and not line.startswith("Linked worktrees:")
+    )
+    assert main.startswith("*") == (location == "main")
+    assert feature.startswith("*") == (location == "linked-subdirectory")
     assert entries[0]["is_current"] is True and entries[1]["is_current"] is False
 
 
@@ -1361,7 +1371,7 @@ def test_list_head_commit_time_is_separate_from_directory_creation(tmp_path, mon
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     _stub_list_facts(monkeypatch, repo_dir, entries, **{entries[1]["path"]: {"directory_created": now - 86400}})
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--detail", "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
     assert "HEAD committed: " + _local_time(now - 2 * 86400) in result.output
@@ -1382,7 +1392,7 @@ def test_list_local_file_time_is_separate_from_head_commit_time(tmp_path, monkey
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     _stub_list_facts(monkeypatch, repo_dir, entries, **{entries[1]["path"]: {"file_changed": now - 3 * 3600}})
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--detail", "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
     assert "Local file changed: " + _local_time(now - 3 * 3600) in result.output
@@ -1404,7 +1414,9 @@ def test_list_modified_column_marks_stale_rows(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     flat_output = result.output.replace("\n", "")
     assert "stale-branch" in flat_output
-    # the stale row's Modified cell: '-' (moot once the directory is gone)
+    row = next(line for line in result.stdout.splitlines() if "stale-branch" in line)
+    assert "Stale" in row and "Clean" not in row
+    # the stale row's legacy Modified cell: '-' (moot once the directory is gone)
     assert cli._modified_cell(entries[1], {}) == "[dim]-[/]"
 
 
@@ -1472,7 +1484,7 @@ def test_list_collects_and_revalidates_facts_once_before_rendering(tmp_path, mon
     validate.assert_called_once_with({repo_dir: entries}, facts)
     legacy.assert_not_called()
     assert events == ["revalidate", "render"]
-    assert result.output.count("Local file changed: " + _local_time(now - 3600)) == 3
+    assert all(branch in result.stdout for branch in ("main", "dirty-a", "dirty-b"))
 
 
 def test_last_modified_requires_a_prepared_value_for_a_dirty_entry(tmp_path):
@@ -2376,7 +2388,7 @@ def test_list_parked_mark_and_timestamp_are_separate_fields(tmp_path, monkeypatc
     park.park(repo_dir, "parked-branch", at=now - 6 * 86400)
     _stub_list_facts(monkeypatch, repo_dir, entries)
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--detail", "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
     parked = result.output.split("Branch: parked-branch", 1)[1]
@@ -2404,7 +2416,7 @@ def test_list_marks_follow_up_when_the_head_moved_since_parking(tmp_path, monkey
     park.park(repo_dir, "comeback", at=now - 10 * 86400)
     _stub_list_facts(monkeypatch, repo_dir, entries)
 
-    result = runner.invoke(app, ["list", str(repo_dir), "--no-size"], env={"COLUMNS": "80"})
+    result = runner.invoke(app, ["list", str(repo_dir), "--detail", "--no-size"], env={"COLUMNS": "80"})
 
     assert result.exit_code == 0, result.output
     comeback = result.output.split("Branch: comeback", 1)[1]

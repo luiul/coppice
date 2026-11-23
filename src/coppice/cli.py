@@ -1443,7 +1443,7 @@ def cmd_list(
         typer.Option(
             "--verbose",
             "-v",
-            help="Show each full worktree path. Paths wrap instead of truncating.",
+            help="Use the detailed view and show each full worktree path. Paths wrap instead of truncating.",
         ),
     ] = False,
     show_pr: Annotated[
@@ -1461,12 +1461,16 @@ def cmd_list(
         bool,
         typer.Option("--explain", help="Explain overview fields without scanning repositories or checking remotes."),
     ] = False,
+    detail: Annotated[
+        bool,
+        typer.Option("--detail", help="Show all fields in grouped tables or narrow cards."),
+    ] = False,
     pr_detail: Annotated[
         bool,
-        typer.Option("--pr-detail", help="Show every matching PR and link after the table."),
+        typer.Option("--pr-detail", help="Show every matching PR and link after the listing."),
     ] = False,
 ) -> None:
-    """Show checkout, local changes, activity, integration, and PR facts separately.
+    """Show one row per worktree. Use --detail for the full field breakdown.
 
     Main worktrees appear beside linked worktrees. Repositories without
     linked worktrees are hidden across multiple repos unless --all is set.
@@ -1598,6 +1602,7 @@ def cmd_list(
         size_cache=size_cache,
         show_all=show_all,
         verbose=verbose,
+        detail=detail,
         pr_lookups=pr_lookups,
         remote_lookups=remote_lookups,
         current_path=current_root,

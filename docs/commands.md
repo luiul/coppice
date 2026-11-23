@@ -11,7 +11,7 @@ that branch's **worktree**, not the branch itself:
 | `cop new PATH [--branch B] [--base REF]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache; an explicit `REF` is fetched from its remote first, best-effort, since `wt` forks from the remote-tracking ref as it stands locally), plus a worktree checked out onto it; worktree setup comes from `wt`'s lifecycle hooks, with no editor option or editor-specific environment override from coppice; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y`; if `B`'s worktree path is occupied by a worktree checked out on another branch (a directory created for `B` earlier, later `git switch`ed away by hand), offers a remedy and retries: switch the occupier back to `B` in place (the default remedy, `s`: the directory stays put, the occupier's commits stay on its branch), or, when `wt` can move the occupier, relocate it to its own expected path (explicit `r` only: a fresh `B` worktree then takes over the old path, and tools attached to the old path, pi sessions, editors, terminals, keep pointing at it); never moves or creates directories when stdin isn't a terminal |
 | `cop orca PATH [--branch B] [--base REF]` | a repo **path** | opens the main worktree in Orca, or finishes wt setup for a named task worktree and opens Pi there |
 | `cop rex PATH [--branch B] [--base REF] [--session ID]` | a repo **path** | opens or focuses a shell tab in the selected local Rex session after wt setup |
-| `cop list [PATH]` | nothing, or a repo path | lists worktree records, including the main worktree and detached HEAD, not every branch; groups tables by repo on wide terminals and uses full labeled cards on narrow terminals; Type, Branch, current worktree, registration, and path mismatch are separate fields |
+| `cop list [PATH]` | nothing, or a repo path | lists one row per worktree, including main worktrees and detached HEAD, grouped by repo; `--detail` shows grouped tables or narrow cards |
 | `cop sync [BRANCH...]` | nothing, or branch **names** | merges the repo's base remote into each branch's worktree (all of them by default), keeping long-lived worktrees current |
 | `cop relocate [PATH]` | nothing, or a repo path | moves each mismatched worktree (a directory created for one branch, later `git switch`ed to another, so the path and the checkout disagree) back to the path the worktree-path template assigns its branch, after a preview and confirmation; every move is computed by `wt step relocate`, never by a local copy of the template |
 | `cop remove BRANCH...` | one or more branch **names** | deletes each branch's worktree directory; the branch itself survives unless it's merged or `-D`/`--force-delete` is passed |
@@ -45,10 +45,11 @@ cop unpark feat-a                         # follow-up arrived: back to active (s
 cop relocate                             # move worktrees with a Path mismatch back to their template paths
 cop relocate --dry-run                   # ...preview the moves, changing nothing
 cop relocate ~/dbt-models                # ...scoped to one repo
-cop list                                 # grouped worktree facts across known repos and the current repo
+cop list                                 # compact rows across known repos and the current repo
+cop list --detail                        # full field breakdown in wide tables or narrow cards
 cop list ~/dbt-models                    # just this repo, including its main worktree
 cop list --all                           # also show main-only repos in the multi-repo view
-cop list --verbose                       # show full worktree paths, wrapped when needed (also -v)
+cop list --verbose                       # detailed view with full paths, wrapped when needed (also -v)
 cop list --no-size                       # skip the disk-usage walk for a faster listing
 cop list --no-pr                         # skip PR history lookup and hide PR fields
 cop list --no-remote-default             # skip remote integration checks and hide their field
@@ -75,7 +76,11 @@ bare `cop PATH` is shorthand for `cop new PATH`.
 
 ## List layout and local fields
 
-`cop list` shows one row per worktree record, grouped by repo in wide-terminal tables. Narrow terminals use full labeled cards. The cards keep every field enabled by the options, rather than combine facts or hide columns. Wide tables use stable worktree row labels across field groups within each repo. A branch without a worktree is not listed.
+`cop list` groups compact rows by repo. Each worktree uses one line. A branch without a worktree is not listed. `Main` and `Linked` identify worktree type. An asterisk marks the current worktree. Long branch names can end in an ellipsis. Detached HEAD rows show the short commit when known.
+
+`Local` shows stale registrations, current index conflicts, reported Git operations, and dirty or clean status. It shows `Unknown` when the available counts cannot establish either dirty or clean. `Task` flags path mismatch, a parked mark, or follow-up. `Parked?` means the mark exists but follow-up is unknown. `Origin` reports fresh remote default integration. On wider terminals, `WT relation` also shows Worktrunk's reported comparison, not fresh remote evidence. A dash in `Origin` or `PR` means not checked. `N/A` means the check does not apply.
+
+Use `--detail` for all enabled fields and full branch names. Wide terminals use grouped tables with stable worktree labels within each repo. Narrow terminals use full labeled cards. `-v` also selects the detailed layout and shows the full path.
 
 Each shown repo includes its main worktree as a display row. Repos with no linked worktrees are hidden in the multi-repo view unless you pass `--all` or `-a`. An explicit repo path shows its main worktree even without `--all`. Adding a display row does not add a remote-default or PR lookup for it. Uncollected results show `Not checked`.
 
@@ -135,7 +140,7 @@ Local fact collection uses at most eight repo workers, a 30-second budget per re
 
 ## PR information in list
 
-`cop list` includes separate PR lookup, PR state, PR number, and Additional PRs fields by default. It does not depend on an open Orca workspace. State shows Draft, Open, Merged, or Closed for the selected PR. The number is separate and links to GitHub where the terminal supports links. Lookup shows `Complete`, `Unknown`, `N/A`, or `Not checked`. A complete lookup with PR state `None` means no PR matches.
+`cop list` shows the selected PR's state and linked number together, such as `Open #123`, with a count of other matches when present. `No PR` means a complete lookup found no match. `--detail` shows separate PR lookup, PR state, PR number, and Additional PRs fields. It does not depend on an open Orca workspace. State shows Draft, Open, Merged, or Closed for the selected PR. Lookup shows `Complete`, `Unknown`, `N/A`, or `Not checked`. A complete lookup with PR state `None` means no PR matches.
 
 Open and draft PRs take priority over historical PRs. Among PRs with the same priority, the most recently updated comes first, with PR number as a tie breaker. Additional PRs counts other matching PRs. `--pr-detail` prints every match and its full URL. Branch names can be reused, so an older match does not prove that the current worktree is the original PR branch.
 
@@ -149,7 +154,7 @@ Run `cop link-pr [PATH]` to attach the primary PR for that worktree to an existi
 
 ## Remote default in list
 
-The `HEAD integration` field in Remote default integration checks current committed HEAD against the actual default branch in GitHub's fresh `origin` metadata. Repo metadata separates Remote name, Remote default branch, Observed remote commit, and Remote checked at. Coppice's local ancestry, Worktrunk's content integration and predicted conflicts, cached tracking counts, and branch-name PR history remain separate.
+The `Origin` column (called `HEAD integration` in `--detail`) checks current committed HEAD against the actual default branch in GitHub's fresh `origin` metadata. Detailed repo metadata separates Remote name, Remote default branch, Observed remote commit, and Remote checked at. Coppice's local ancestry, Worktrunk's content integration and predicted conflicts, cached tracking counts, and branch-name PR history remain separate.
 
 - `Reached`: HEAD is an ancestor of the observed remote default SHA. Alternatively, a merged PR has this exact original head, the same head and base repo, the actual default branch as its target, and a merge commit reachable from the observed remote default.
 - `Pending`: complete ancestry and commit-associated PR checks found no integration into that target. Pushing only a feature branch does not mean it reached the remote default.
