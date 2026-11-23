@@ -42,12 +42,12 @@ from coppice import (
     confirm,
     gh,
     git,
-    herdr,
     list_facts,
     list_view,
     orca,
     remote_default,
     repo,
+    rex,
     shell,
     sizes,
     vscode,
@@ -216,8 +216,9 @@ def cmd_new(
         bool,
         typer.Option("--yes", "-y", help="Skip the confirmation prompt when the branch already exists."),
     ] = False,
+    main_worktree: Annotated[bool, typer.Option("--main-worktree", help="Enter the existing main worktree.")] = False,
 ) -> None:
-    """Create or reuse a worktree for the repo at PATH.
+    """Create or reuse a worktree for the repo at PATH. Empty input enters the main worktree.
 
     Worktree setup belongs to wt's lifecycle hooks. This command does not
     set an editor policy or pass an editor-specific environment override.
@@ -235,7 +236,7 @@ def cmd_new(
         coppice new ./tardis
         coppice new . --branch fix-thing --base develop
     """
-    _create_worktree(path, branch, base, yes, surface=None)
+    _create_worktree(path, branch, base, yes, main_worktree=main_worktree, surface=None)
 
 
 @app.command("orca", rich_help_panel="Create")
@@ -253,31 +254,78 @@ def cmd_orca(
         bool,
         typer.Option("--yes", "-y", help="Skip the confirmation prompt when the branch already exists."),
     ] = False,
+    main_worktree: Annotated[bool, typer.Option("--main-worktree", help="Open the existing main worktree.")] = False,
 ) -> None:
-    """Watch a repo, create or reuse a worktree, then open Pi in Orca.
+    """Open a task worktree with Pi or, on empty input, open the main worktree in Orca.
 
-    Uses wt for worktree setup and paths. Enters the resulting directory
-    when shell integration is installed. Existing Pi is reused safely.
-    Orca must be running. Use --branch to reopen a particular worktree.
+    Uses wt for task worktree setup. Main worktree selection does not request
+    a new Pi launch; Orca may restore a session. Orca must be running.
     """
-    _create_worktree(path, branch, base, yes, surface="orca")
+    _create_worktree(path, branch, base, yes, main_worktree=main_worktree, surface="orca")
 
 
-@app.command("herdr", rich_help_panel="Create")
-def cmd_herdr(
-    path: Annotated[str, typer.Argument(help="Repo to create/reuse a worktree in and open in Herdr.")] = ".",
+@app.command("rex", rich_help_panel="Create")
+def cmd_rex(
+    path: Annotated[str, typer.Argument(help="Repo to open in Rex.")] = ".",
     branch: Annotated[str | None, typer.Option("--branch", "-b", help="Branch name. Prompts if omitted.")] = None,
     base: Annotated[str | None, typer.Option("--base", "-B", help="Base branch/ref. Defaults to the repo's default branch.")] = None,
     yes: Annotated[bool, typer.Option("--yes", "-y", help="Skip confirmation when the branch exists.")] = False,
+    main_worktree: Annotated[bool, typer.Option("--main-worktree", help="Open the existing main worktree.")] = False,
+    session: Annotated[str | None, typer.Option("--session", help="Full local Rex session ID. Defaults to the calling Rex session.")] = None,
 ) -> None:
-    """Create or reuse a wt worktree, then open Pi in Herdr and enter its directory."""
-    _create_worktree(path, branch, base, yes, surface="herdr")
+    """Open a shell tab in Rex after wt setup. Empty input opens the main worktree."""
+    _create_worktree(path, branch, base, yes, main_worktree=main_worktree, surface="rex", session=session)
+
+
+def _main_worktree(path: str, surface: str | None, session: str | None) -> None:
+    try:
+        target, branch = repo.main_worktree(path)
+        default = repo.cached_default_branch(target)
+        console.print(f"Main worktree: {target}", markup=False)
+        console.print(f"Branch: {branch if branch is not None else 'Detached HEAD'}", markup=False)
+        if default and default != branch:
+            console.print(f"Cached default branch: {default}. The checkout is unchanged.", markup=False)
+    except (repo.RepoResolutionError, OSError) as exc:
+        raise _fail(str(exc)) from exc
+
+    retry_path = str(target)
+    retry_session = session
+    try:
+        rex_target = rex.prepare(target, session) if surface == "rex" else None
+        if rex_target is not None:
+            retry_session = rex_target.session
+        if repo.main_worktree(path) != (target, branch):
+            raise workflow.HandoffError("The main worktree changed. Retry after checking its branch and path.")
+        shell.write_cd_file(target)
+        if surface == "orca":
+            console.print(orca.activate_main(target), markup=False)
+        elif rex_target is not None:
+            console.print(rex.handoff(rex_target, target, label=f"{target.name}: {branch or 'detached'}"), markup=False)
+    except (repo.RepoResolutionError, workflow.HandoffError, OSError) as exc:
+        if surface:
+            _print_open_retry(surface, retry_path, ["--main-worktree"], retry_session)
+        raise _fail(str(exc)) from exc
+
+
+def _print_open_retry(surface: str, path: str, selection: list[str], session: str | None) -> None:
+    args = ["cop", surface, path, *selection]
+    if session is not None:
+        args += ["--session", session]
+    console.print(f"Retry: {shlex.join(args)}", markup=False)
 
 
 def _create_worktree(
-    path: str, branch: str | None, base: str | None, yes: bool, *, surface: str | None
+    path: str, branch: str | None, base: str | None, yes: bool, *,
+    main_worktree: bool, surface: str | None, session: str | None = None,
 ) -> None:
-    """Shared worktree workflow. Explicit orchestrator commands add their handoff."""
+    """Shared checkout selection and setup. Open an app only on request."""
+    if main_worktree:
+        if branch is not None or base is not None:
+            raise _fail("--main-worktree cannot be combined with --branch or --base.")
+        _main_worktree(path, surface, session)
+        return
+    if branch is None and not _stdin_is_tty():
+        raise _fail("Use --branch or --main-worktree when stdin is not a terminal.")
     try:
         repo_root = repo.resolve_repo_root(path)
     except repo.RepoResolutionError as exc:
@@ -293,15 +341,20 @@ def _create_worktree(
     if branch is None:
         _print_existing_worktrees(repo_root)
         description = typer.prompt(
-            "Short branch description (optional, enter for a timestamp id)",
+            "Short branch description (Enter uses the main worktree)",
             default="",
             show_default=False,
         )
-        if description.strip():
-            branch = branch_mod.normalize_branch(description)
-        else:
-            branch = branch_mod.timestamp_branch()
-            console.print(f"No description entered, using timestamp branch: [bold]{branch}[/]")
+        if not description.strip():
+            if base is not None:
+                raise _fail("--base needs a task branch. Omit --base to select the main worktree.")
+            _main_worktree(path, surface, session)
+            return
+        branch = branch_mod.normalize_branch(description)
+        if not branch:
+            raise _fail("Use a description with letters or numbers, or pass --branch.")
+    if not branch.strip():
+        raise _fail("--branch must name a branch.")
 
     console.print(f"Worktree branch: [bold]{branch}[/]")
 
@@ -326,13 +379,14 @@ def _create_worktree(
         _freshen_explicit_base(repo_root, base)
 
     setup = None
-    herdr_target = None
+    rex_target = None
     if surface:
         try:
             if surface == "orca":
                 setup = orca.prepare_workflow(repo_root)
             else:
-                setup, herdr_target = herdr.prepare_workflow(repo_root)
+                rex_target = rex.prepare(repo_root, session)
+                setup = workflow.prepare(repo_root)
         except (workflow.HandoffError, OSError) as exc:
             raise _fail(str(exc)) from exc
 
@@ -340,7 +394,8 @@ def _create_worktree(
         switch_options = {"config_overrides": setup.suppress} if setup else {}
         if setup:
             assert surface is not None
-            console.print(f"Creating the checkout and finishing wt setup for {surface.title()}...")
+            label = "Orca" if surface == "orca" else "Rex"
+            console.print(f"Preparing the worktree for {label}...")
             result = workflow.switch_ready(
                 setup, branch, base,
                 lambda: _switch_with_recovery(repo_root, branch, create=create, base=base, **switch_options),
@@ -380,26 +435,36 @@ def _create_worktree(
         )
     else:
         console.print(f"{verb} worktree for [bold]{branch}[/]{from_suffix}")
+    if result_path and not created and result.get("base_branch") is None and not result.get("setup_error"):
+        checkout = Path(result_path).resolve()
+        if (
+            checkout != repo_root.resolve()
+            and (expected := wt.expected_worktree_path(repo_root, branch)) is not None
+            and checkout != expected
+        ):
+            console.print(f"Worktree path: {checkout}\nWorktrunk expects: {expected}\nThe checkout is unchanged.", markup=False)
     console.print()
 
+    retry_session = rex_target.session if rex_target is not None else None
     if result_path:
         shell.write_cd_file(Path(result_path))
         if setup:
             assert surface is not None
+            label = "Orca" if surface == "orca" else "Rex"
             try:
                 if result.get("setup_error"):
                     raise workflow.HandoffError(result["setup_error"])
-                console.print(f"Opening Pi in {surface.title()}...")
                 if surface == "orca":
+                    console.print("Opening Pi in Orca...")
                     message = orca.handoff(Path(result_path))
                 else:
-                    assert herdr_target is not None
-                    message = herdr.handoff(herdr_target, repo_root, Path(result_path))
+                    assert rex_target is not None
+                    console.print("Opening a shell tab in Rex...")
+                    message = rex.handoff(rex_target, Path(result_path), label=f"{repo_root.name}: {branch}")
                 console.print(message)
             except (workflow.HandoffError, OSError) as exc:
-                console.print(f"Worktree exists, but the {surface.title()} handoff failed: {exc}", markup=False)
-                args = ["cop", surface, str(repo_root), "--branch", branch, "--yes"]
-                console.print(f"Retry: {shlex.join(args)}", markup=False)
+                console.print(f"Worktree exists, but the {label} handoff failed: {exc}", markup=False)
+                _print_open_retry(surface, str(repo_root), ["--branch", branch, "--yes"], retry_session)
                 raise typer.Exit(1) from exc
 
 

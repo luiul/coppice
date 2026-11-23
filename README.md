@@ -102,38 +102,25 @@ The check supports direct integration and PR merges, including squash merges wit
 
 `Reached` describes committed HEAD, not dirty edits, live deployment, or removal permission. Local ancestry, Worktrunk content integration and predicted conflicts, and branch-name PR history stay separate. Use `--no-remote-default` to skip this check. Use `--no-pr --no-remote-default` for a listing without GitHub checks. JSON remains unchanged and performs neither lookup. Checks do not fetch or change Git refs. The display adds no new family of network calls.
 
-## Pi in Orca or Herdr
-
-Use an explicit orchestrator command to start work. Both commands use wt to create or reuse a worktree, finish setup, start or reuse Pi, focus its terminal, and enter the worktree through shell integration. The selected orchestrator must be running.
+## Worktrees in the shell, Orca, or Rex
 
 ```zsh
-cop orca                                 # current repo, prompt for a branch description
-cop herdr                                # same workflow in Herdr
-cop orca ~/projects/personal/my-repo      # a repo path from anywhere
-cop herdr ~/projects/personal/my-repo
-cop orca --branch fix-import              # choose a branch
-cop herdr --branch fix-import --yes       # reopen a branch without the reuse confirmation
-cop new --branch experiment               # worktree only, no orchestrator action
+cop new --main-worktree                   # enter the original checkout, no app action
+cop new --branch experiment               # create or reuse a checkout without opening an app
+cop orca --branch fix-import              # open the task checkout and start or reuse Pi
+cop rex --branch fix-import               # open a shell tab in the calling Rex session
+cop rex /path/to/repo --main-worktree --session session:<full-id>
 ```
 
-All three commands accept a repo path, including a subdirectory or linked worktree within it. They support `--branch`, `--base`, and `--yes`. Without `--branch`, they use the existing branch-description prompt. A linked-worktree path does not silently select its branch.
+All three commands take a repo path, which can be a subdirectory or linked worktree. Without `--branch`, pressing Enter on the interactive description prompt selects the **main worktree**, not the default branch. This replaces the old timestamp branch behavior. Piped input cannot select a checkout; pass `--branch` or `--main-worktree` explicitly. `--main-worktree` selects it without prompting and cannot be combined with `--branch` or `--base`. It does not fetch, change the checkout's branch, or rerun setup. A nonempty description must yield a branch name. Use `--yes` only to skip confirmation when a named branch already exists.
 
-`cop new` uses normal wt hooks and never contacts either orchestrator. Direct wt calls also open no Herdr or Orca workspace. The explicit workflows finish configured user setup before launching Pi. Agent-marked and piped calls do not start this workflow. Repo-file or system background setup needs an explicit readiness barrier; Coppice stops before creation rather than race it.
+`cop new` uses normal Worktrunk hooks and opens no app. `cop orca` and `cop rex` wait for Worktrunk setup before opening a new task checkout. They need an interactive, non-agent shell. Repo or system background setup needs an explicit readiness barrier. Coppice stops before creating the checkout if it cannot wait for that setup. When shell integration is loaded, the caller also enters the selected checkout.
 
-`cop orca` registers the main checkout and shows external worktrees. You no longer need to call `owa` first. That helper remains available for watch-only use. Orca's native worktree creation is not used.
+`cop orca` registers the repo and makes external worktrees visible in the running app, including when you select the main worktree. It does not use Orca's native worktree creation. For the main worktree it activates the existing workspace without asking Orca to start Pi or submit a task. Orca may restore sessions according to its own settings.
 
-`cop herdr` needs the Worktrunk helper `wt-herdr` on PATH. It checks the Herdr app and Core before creating a checkout. After setup, it passes the exact repo and checkout paths to the helper. The helper owns space grouping, Pi reuse and launch, and terminal focus. Legacy Herdr sessions and `--session` are not supported. The global wt config has no Herdr launch hook.
+`cop rex` opens a shell, not Pi. Run it in a session on the local default Rex server or pass the full session ID from `rex session ls --json` for that server. It sets the active tab in that session; it does not switch the desktop app between sessions. Select the intended working session, not a dashboard session. Reuse checks Coppice's saved tab and pane IDs and the live terminal directory.
 
-Setup has a 240-second deadline. Calls and launch readiness are bounded. Orca discovery waits at most 45 seconds. Herdr helper checks have a 10-second deadline, and opening has a 90-second deadline. If a handoff fails after creation, the checkout remains and shell navigation still works; the command returns a failure status and prints a complete retry with the repo and branch.
-
-```zsh
-cop orca /path/to/repo --branch fix-import --yes
-cop herdr /path/to/repo --branch fix-import --yes
-```
-
-Retries finish pending setup, safely reuse Pi, and focus its terminal. They do not create an extra worktree or agent. If a launch or terminal identity is uncertain, Coppice stops rather than risk a duplicate. A title alone is not proof of a running Pi.
-
-Opening Orca's verified Pi terminal binds its terminal state. Hide sleeping keeps the worktree visible, even when Pi is idle.
+If setup or app opening fails, the checkout stays on disk. The error gives a retry. A retry can finish pending setup without recreating the worktree. If Rex cannot confirm a tab creation or Orca cannot confirm a Pi launch, Coppice stops rather than create a duplicate.
 
 
 ## Concepts

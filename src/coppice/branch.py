@@ -7,14 +7,8 @@ Used by `coppice new`'s interactive prompt: lowercase, dash-joined,
 from __future__ import annotations
 
 import re
-from datetime import datetime
 
 MAX_BRANCH_LENGTH = 40
-
-
-def timestamp_branch() -> str:
-    """Fallback branch name for when no usable description is given."""
-    return f"wip-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
 
 
 def normalize_branch(description: str) -> str:
@@ -23,8 +17,7 @@ def normalize_branch(description: str) -> str:
     Lowercases, collapses whitespace/underscores/slashes into dashes, strips
     anything that isn't alphanumeric or a dash, trims leading/trailing dashes,
     and caps the result at MAX_BRANCH_LENGTH characters, cutting on a dash
-    boundary rather than mid-word. Falls back to a timestamp branch if
-    nothing usable survives.
+    boundary rather than mid-word. Returns an empty string if nothing usable survives.
     """
     slug = description.strip().lower()
     slug = re.sub(r"[\s/_]+", "-", slug)
@@ -36,4 +29,4 @@ def normalize_branch(description: str) -> str:
         slug = slug.rsplit("-", 1)[0] if "-" in slug else slug
         slug = slug.strip("-")
 
-    return slug or timestamp_branch()
+    return slug

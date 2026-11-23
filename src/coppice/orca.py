@@ -194,30 +194,51 @@ def attach_pr_references(path: Path, branch: str, urls: list[str]) -> int:
 
 
 def manual_invocation() -> bool:
-    return workflow.manual_invocation() and not (
-        os.environ.get("HERDR_ENV") == "1" or os.environ.get("HERDR_SOCKET_PATH")
-    )
+    return workflow.manual_invocation()
 
 
-def watch(root: Path) -> None:
+def watch(root: Path, *, local: bool = False) -> None:
     """Register only when missing, then show wt-created external checkouts."""
     if not shutil.which("orca"):
         raise HandoffError("Orca is not installed.")
+    scope = ["--environment", "local"] if local else []
     try:
-        _orca(["repo", "show", "--repo", f"path:{root}"], cwd=root)
+        _orca(["repo", "show", "--repo", f"path:{root}", *scope], cwd=root)
     except OrcaError as exc:
         if exc.code != "repo_not_found":
             raise
-        _orca(["repo", "add", "--path", str(root)], cwd=root)
-    _orca(["repo", "set", "--repo", f"path:{root}", "--external-worktree-visibility", "show"], cwd=root)
+        _orca(["repo", "add", "--path", str(root), *scope], cwd=root)
+    _orca(["repo", "set", "--repo", f"path:{root}", "--external-worktree-visibility", "show", *scope], cwd=root)
 
 
 def prepare_workflow(root: Path) -> Setup:
     """Explicit command: preflight before creating any checkout."""
     if not manual_invocation():
-        raise HandoffError("cop orca needs an interactive shell outside agent-marked or Herdr calls. Use cop new for worktree-only creation.")
+        raise HandoffError("cop orca needs an interactive, non-agent shell. Use cop new for worktree-only creation.")
     watch(root)
     return workflow.prepare(root)
+
+
+def activate_main(path: Path) -> str:
+    """Reveal the exact local Git workspace without explicitly launching Pi."""
+    if not manual_invocation():
+        raise HandoffError("cop orca needs an interactive, non-agent shell. Use cop new for worktree-only navigation.")
+    path = path.resolve(strict=True)
+    watch(path, local=True)
+    with checkout_lock(path):
+        if _setup_path(path).exists():
+            raise HandoffError("Worktree setup is still pending. Finish setup before opening it in Orca.")
+        workspace = _orca(["worktree", "show", "--environment", "local", "--worktree", f"path:{path}"], cwd=path)
+        row = workspace.get("worktree")
+        if not isinstance(row, dict):
+            raise HandoffError("Orca did not return a Git workspace.")
+        key, _, row_path, _, _ = _pr_worktree_identity(row, ["local"])
+        if row.get("isMainWorktree") is not True or Path(row_path).resolve(strict=True) != path:
+            raise HandoffError("Orca did not confirm the selected main worktree.")
+        result = _orca(["worktree", "activate", "--environment", "local", "--worktree", f"identity:{key}"], cwd=path)
+        if result.get("worktreeId") != row["id"]:
+            raise HandoffError("Orca did not confirm activation of the selected main worktree.")
+    return "Opened the main worktree in Orca. Orca may restore its existing sessions."
 
 
 def prepare(root: Path) -> Setup | None:

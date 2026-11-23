@@ -228,6 +228,23 @@ def switch(
     return _load_json(proc.stdout)
 
 
+def expected_worktree_path(repo: Path, branch: str) -> Path | None:
+    """Ask Worktrunk for its configured path, without running checkout hooks."""
+    template = "{{ expected_worktree_path_of_branch(" + json.dumps(branch, ensure_ascii=False) + ") }}"
+    try:
+        proc = subprocess.run(
+            ["wt", "-C", str(repo), "step", "eval", "--format", "json", template],
+            capture_output=True, text=True, timeout=5,
+        )
+        if proc.returncode == 0:
+            result = _load_json(proc.stdout).get("result")
+            if isinstance(result, str) and Path(result).is_absolute():
+                return Path(result).resolve()
+    except (AttributeError, ValueError, OSError, subprocess.TimeoutExpired):
+        pass
+    return None
+
+
 def relocate_preview(repo: Path, branch: str) -> list[dict[str, str]]:
     """Dry-run `wt step relocate BRANCH`: the [{"from":..., "to":...}] moves
     it would make. Empty when BRANCH can't be relocated (locked, detached

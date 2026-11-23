@@ -495,6 +495,7 @@ def test_new_shows_the_worktree_preview_before_prompting_interactively(tmp_path,
     list_calls: list[Path] = []
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: list_calls.append(_repo) or [])
 
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
     result = runner.invoke(app, ["new", str(repo_dir)], input="\n")
 
     assert result.exit_code == 0, result.output
@@ -2635,6 +2636,7 @@ def test_remove_refuses_a_parked_worktree(tmp_path, monkeypatch):
     monkeypatch.setattr(wt, "list_worktrees", lambda _repo: entries)
     monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
     park.park(repo_dir, "feat", at=1_700_000_000.0)
+    monkeypatch.setattr(cli.err, "width", 160)
 
     result = runner.invoke(app, ["remove", "feat", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"})
 
@@ -2731,6 +2733,7 @@ def test_clean_skips_parked_worktrees(tmp_path, monkeypatch):
     monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     park.park(repo_dir, "old-parked", at=now - 10 * 86400)
+    monkeypatch.setattr(cli.console, "width", 160)
 
     result = runner.invoke(app, ["clean", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"})
 
@@ -2760,6 +2763,7 @@ def test_clean_merged_skips_parked_worktrees(tmp_path, monkeypatch):
     monkeypatch.setattr(wt, "remove", lambda _repo, branch, **k: removed.append(branch))
     monkeypatch.setattr(wt, "branch_exists", lambda _repo, _branch: True)
     park.park(repo_dir, "merged-parked", at=now - 10 * 86400)
+    monkeypatch.setattr(cli.console, "width", 160)
 
     result = runner.invoke(app, ["clean", "--merged", "--repo", str(repo_dir), "--yes"], env={"COLUMNS": "160"})
 

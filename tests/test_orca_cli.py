@@ -175,20 +175,19 @@ def test_creation_commands_accept_matching_flags(monkeypatch, creation, workflow
 
 
 @pytest.mark.parametrize("command", ["new", "orca"])
-@pytest.mark.parametrize("description,branch", [("Fix thing / one", "fix-thing-one"), ("", "wip-fixed-timestamp")])
-def test_creation_commands_share_description_prompt(monkeypatch, creation, workflow, command, description, branch):
+def test_creation_commands_share_description_prompt(monkeypatch, creation, workflow, command):
     root, calls, cd = creation
     _, prepare = workflow
     existing = Mock()
     monkeypatch.setattr(cli, "_print_existing_worktrees", existing)
-    monkeypatch.setattr(cli.branch_mod, "timestamp_branch", lambda: "wip-fixed-timestamp")
+    monkeypatch.setattr(cli, "_stdin_is_tty", lambda: True)
 
-    result = runner.invoke(cli.app, [command, str(root)], input=f"{description}\n")
+    result = runner.invoke(cli.app, [command, str(root)], input="Fix thing / one\n")
 
     assert result.exit_code == 0, result.output
     assert "Short branch description" in result.output
     existing.assert_called_once_with(root)
-    assert calls[0][0] == (root, branch)
+    assert calls[0][0] == (root, "fix-thing-one")
     assert calls[0][1]["create"] is True
     assert calls[0][1]["base"] == "main"
     assert cd == [root / "checkout"]

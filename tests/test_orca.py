@@ -132,21 +132,16 @@ def config_setup(monkeypatch, config, *, registration=None):
     return query, run
 
 
-@pytest.mark.parametrize(
-    "name,value",
-    [("WORKTRUNK_AGENT", "1"), ("HERDR_ENV", "1"), ("HERDR_SOCKET_PATH", "/tmp/herdr.sock")],
-)
-def test_prepare_skips_agent_and_herdr_invocations(monkeypatch, checkout, name, value):
-    monkeypatch.setenv(name, value)
+def test_prepare_skips_agent_invocations(monkeypatch, checkout):
+    monkeypatch.setenv("WORKTRUNK_AGENT", "1")
     assert orca.manual_invocation() is False
     assert orca.prepare(checkout) is None
     orca._orca.assert_not_called()
     orca._run.assert_not_called()
 
 
-@pytest.mark.parametrize("name", ["WORKTRUNK_AGENT", "HERDR_ENV", "HERDR_SOCKET_PATH"])
-def test_manual_invocation_allows_inactive_environment(monkeypatch, name):
-    monkeypatch.setenv(name, "" if name == "HERDR_SOCKET_PATH" else "0")
+def test_manual_invocation_allows_inactive_environment(monkeypatch):
+    monkeypatch.setenv("WORKTRUNK_AGENT", "0")
     assert orca.manual_invocation() is True
 
 
@@ -1028,13 +1023,6 @@ def test_orca_failure_without_error_uses_command_failed(monkeypatch, checkout, r
         _ORCA(["terminal", "list"], cwd=checkout)
     assert caught.value.code == "command_failed"
     assert caught.value.data == {}
-
-
-@pytest.mark.parametrize("name,value", [("HERDR_ENV", "1"), ("HERDR_SOCKET_PATH", "/tmp/herdr.sock")])
-def test_shared_manual_gate_permits_herdr_but_orca_gate_stays_restricted(monkeypatch, name, value):
-    monkeypatch.setenv(name, value)
-    assert workflow.manual_invocation() is True
-    assert orca.manual_invocation() is False
 
 
 def test_shared_manual_gate_rejects_agent_marked_shell(monkeypatch):

@@ -70,7 +70,7 @@ def test_workflow_requires_manual_call_before_watch(monkeypatch, tmp_path):
     monkeypatch.setattr(orca, "manual_invocation", lambda: False)
     watch = Mock()
     monkeypatch.setattr(orca, "watch", watch)
-    with pytest.raises(orca.HandoffError, match="interactive shell"):
+    with pytest.raises(orca.HandoffError, match="interactive, non-agent shell"):
         orca.prepare_workflow(tmp_path)
     watch.assert_not_called()
 

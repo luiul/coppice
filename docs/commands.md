@@ -9,8 +9,8 @@ that branch's **worktree**, not the branch itself:
 | Command | Takes | Does |
 |---|---|---|
 | `cop new PATH [--branch B] [--base REF]` | a repo **path** | creates branch `B` if it doesn't exist yet, locally or on the remote (from `REF`, default: the repo's actual default branch, resolved fresh from its remote rather than trusting `wt`'s own cache; an explicit `REF` is fetched from its remote first, best-effort, since `wt` forks from the remote-tracking ref as it stands locally), plus a worktree checked out onto it; worktree setup comes from `wt`'s lifecycle hooks, with no editor option or editor-specific environment override from coppice; if `B` already exists either way, asks before switching to it instead, unless `--yes`/`-y`; if `B`'s worktree path is occupied by a worktree checked out on another branch (a directory created for `B` earlier, later `git switch`ed away by hand), offers a remedy and retries: switch the occupier back to `B` in place (the default remedy, `s`: the directory stays put, the occupier's commits stay on its branch), or, when `wt` can move the occupier, relocate it to its own expected path (explicit `r` only: a fresh `B` worktree then takes over the old path, and tools attached to the old path, pi sessions, editors, terminals, keep pointing at it); never moves or creates directories when stdin isn't a terminal |
-| `cop orca PATH [--branch B] [--base REF]` | a repo **path** | watches the main checkout in Orca, creates or reuses a wt worktree with the same prompts and options as `cop new`, finishes setup, starts or reuses Pi, focuses its terminal, and enters the resulting directory through shell integration |
-| `cop herdr PATH [--branch B] [--base REF]` | a repo **path** | checks the Herdr app and Core through `wt-herdr`, creates or reuses a wt worktree with the same prompts as `cop new`, finishes setup, then asks the helper to open the exact checkout, start or reuse Pi, and focus its terminal; enters the worktree through shell integration; legacy `--session` is not supported |
+| `cop orca PATH [--branch B] [--base REF]` | a repo **path** | opens the main worktree in Orca, or finishes wt setup for a named task worktree and opens Pi there |
+| `cop rex PATH [--branch B] [--base REF] [--session ID]` | a repo **path** | opens or focuses a shell tab in the selected local Rex session after wt setup |
 | `cop list [PATH]` | nothing, or a repo path | lists worktree records, including the main worktree and detached HEAD, not every branch; groups tables by repo on wide terminals and uses full labeled cards on narrow terminals; Type, Branch, current worktree, registration, and path mismatch are separate fields |
 | `cop sync [BRANCH...]` | nothing, or branch **names** | merges the repo's base remote into each branch's worktree (all of them by default), keeping long-lived worktrees current |
 | `cop relocate [PATH]` | nothing, or a repo path | moves each mismatched worktree (a directory created for one branch, later `git switch`ed to another, so the path and the checkout disagree) back to the path the worktree-path template assigns its branch, after a preview and confirmation; every move is computed by `wt step relocate`, never by a local copy of the template |
@@ -21,6 +21,8 @@ A branch with no worktree still exists; `git log`/`git checkout` see it
 fine, it's just not checked out anywhere. It won't show up in `cop list`,
 and there's nothing for `cop remove`/`cop clean` to act on.
 
+For `new`, `orca`, and `rex`, press Enter on the description prompt or pass `--main-worktree` to select the original checkout, regardless of its branch. This skips checkout creation and setup hooks. Use `--branch` to select a named task. The shell wrapper enters the selected directory when installed.
+
 ## Usage
 
 ```bash
@@ -30,8 +32,8 @@ cop new . --branch update-dag-schedule   # skip the prompt, use a specific branc
 cop new . --branch update-dag-schedule --yes   # skip the confirmation when the branch already exists
 cop orca ~/dbt-models                    # watch, create/reuse a worktree, and open Pi in Orca
 cop orca . --branch fix-import --yes      # reopen a branch or retry its Orca workflow
-cop herdr ~/dbt-models                   # the same workflow in Herdr
-cop herdr . --branch fix-import --yes     # reopen or retry in Herdr
+cop rex ~/dbt-models                     # choose a checkout and open a Rex shell tab
+cop orca . --main-worktree                # open the original checkout, without requesting a new Pi
 cop sync                                 # fetch each repo's base remote and merge it into every worktree
 cop sync --dry-run                       # preview what would be merged, changing nothing
 cop sync feat-a feat-b                   # ...just these branches' worktrees

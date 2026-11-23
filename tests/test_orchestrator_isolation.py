@@ -10,7 +10,7 @@ from unittest.mock import Mock
 import pytest
 from typer.testing import CliRunner
 
-from coppice import cli, git, herdr, orca, park, repo, shell, sizes, vscode, workflow, wt
+from coppice import cli, git, orca, park, repo, rex, shell, sizes, vscode, workflow, wt
 
 runner = CliRunner()
 
@@ -19,18 +19,14 @@ def _guards(monkeypatch, *surfaces):
     """Guard entry points and transports without patching shared subprocess."""
     guards = []
     names = {
-        orca: ("prepare_workflow", "prepare", "watch", "handoff", "_orca", "_run",
+        orca: ("prepare_workflow", "prepare", "watch", "handoff", "activate_main", "_orca", "_run",
                "switch_ready", "finish_setup", "resume_setup"),
-        herdr: ("prepare_workflow", "handoff"),
+        rex: ("prepare", "handoff", "_call"),
     }
     for surface in surfaces:
         for name in names[surface]:
             guard = Mock(side_effect=AssertionError(f"Unexpected {surface.__name__}.{name}"))
             monkeypatch.setattr(surface, name, guard)
-            guards.append(guard)
-        if surface is herdr:
-            guard = Mock(side_effect=AssertionError("Unexpected Herdr transport"))
-            monkeypatch.setattr(herdr.Target, "call", guard)
             guards.append(guard)
     return guards
 
@@ -46,7 +42,7 @@ def isolated(monkeypatch, tmp_path):
     """Use real Git metadata, temporary state, and stubbed wt boundaries."""
     monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(tmp_path / "missing-gitconfig"))
-    for name in ("WORKTRUNK_AGENT", "HERDR_ENV", "HERDR_SOCKET_PATH", shell.CD_FILE_ENV_VAR):
+    for name in ("WORKTRUNK_AGENT", "REX_SESSION", shell.CD_FILE_ENV_VAR):
         monkeypatch.delenv(name, raising=False)
     root = (tmp_path / "repo with spaces").resolve()
     root.mkdir()
@@ -65,10 +61,11 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(repo, "REGISTRY_PATH", tmp_path / "registry" / "known-repos")
     repo.register_repo(root)
     monkeypatch.setattr(orca, "STATE_ROOT", tmp_path / "orca-state")
+    monkeypatch.setattr(rex, "STATE_ROOT", tmp_path / "rex-state")
     monkeypatch.setattr(workflow, "STATE_ROOT", tmp_path / "setup-state")
     monkeypatch.setattr(cli.console, "width", 1000)
     monkeypatch.setattr(cli.err, "width", 1000)
-    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/fake/{name}" if name in {"wt", "orca", "wt-herdr"} else None)
+    monkeypatch.setattr(cli.shutil, "which", lambda name: f"/fake/{name}" if name in {"wt", "orca", "rex"} else None)
     monkeypatch.setattr(wt, "require_wt", Mock(return_value="/fake/wt"))
     monkeypatch.setattr(repo, "default_branch", Mock(return_value="main"))
     monkeypatch.setattr(wt, "branch_exists", Mock(return_value=False))
@@ -128,28 +125,27 @@ def isolated(monkeypatch, tmp_path):
     return SimpleNamespace(root=root, checkout=checkout, switch=switch_mock, cd=cd, mutations=mutations)
 
 
-@pytest.mark.parametrize("environment", ["manual", "herdr", "agent"])
+@pytest.mark.parametrize("environment", ["manual", "rex", "agent"])
 @pytest.mark.parametrize("case", [
     "list", "status", "sync", "clean", "relocate", "park", "unpark", "remove",
     "new-create", "new-reuse", "bare-create", "bare-reuse",
 ])
 def test_plain_commands_have_zero_orchestrator_calls(monkeypatch, isolated, case, environment):
     c = isolated
-    if environment == "herdr":
-        monkeypatch.setenv("HERDR_ENV", "1")
-        monkeypatch.setenv("HERDR_SOCKET_PATH", "/tmp/test-only-caller.sock")
+    if environment == "rex":
+        monkeypatch.setenv("REX_SESSION", "session:test")
     elif environment == "agent":
         monkeypatch.setenv("WORKTRUNK_AGENT", "1")
     # Installed and watched Orca must not make a plain command opt in.
     monkeypatch.setattr(orca, "manual_invocation", Mock(return_value=True))
-    guards = _guards(monkeypatch, orca, herdr)
+    guards = _guards(monkeypatch, orca, rex)
     shared_guards = []
     for name in ("prepare", "switch_ready", "finish_setup", "resume_setup"):
         guard = Mock(side_effect=AssertionError(f"Unexpected shared workflow: {name}"))
         monkeypatch.setattr(workflow, name, guard)
         shared_guards.append(guard)
     args = {
-        "list": ["list", "--all", "--no-size"],
+        "list": ["list", "--all", "--no-size", "--no-pr", "--no-remote-default"],
         "status": ["status", "--no-size"],
         "sync": ["sync", "--dry-run"],
         "clean": ["clean", "--merged", "--dry-run"],
@@ -172,7 +168,7 @@ def test_plain_commands_have_zero_orchestrator_calls(monkeypatch, isolated, case
     wt.run.assert_not_called()
     assert result.exit_code == (1 if case == "remove" else 0), result.output
     expected_output = {
-        "list": "probe", "status": c.root.name, "sync": "Dry run, nothing changed",
+        "list": "Linked worktrees: 1", "status": c.root.name, "sync": "Dry run, nothing changed",
         "clean": "Dry run", "relocate": "Dry run, nothing moved", "park": "Parked 'probe'",
         "unpark": "Unparked 'probe'", "remove": "no worktree for branch 'missing-branch'",
     }
@@ -188,15 +184,15 @@ def test_plain_commands_have_zero_orchestrator_calls(monkeypatch, isolated, case
         assert park.parked_at(c.root) == {}
     assert c.checkout.is_dir()
     assert not orca.STATE_ROOT.exists()
-    assert not (c.root.parent / "herdr-state").exists()
+    assert not rex.STATE_ROOT.exists()
     assert not workflow.STATE_ROOT.exists()
 
 
-@pytest.mark.parametrize("surface", ["orca", "herdr"])
+@pytest.mark.parametrize("surface", ["orca", "rex"])
 @pytest.mark.parametrize("case", ["create", "reuse", "cancel", "preflight-fail", "setup-fail", "handoff-fail"])
 def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolated, surface, case):
     c = isolated
-    opposite = herdr if surface == "orca" else orca
+    opposite = rex if surface == "orca" else orca
     guards = _guards(monkeypatch, opposite)
     monkeypatch.setattr(workflow, "manual_invocation", Mock(return_value=True))
     monkeypatch.setattr(workflow, "_branch_has_checkout", Mock(return_value=case in {"reuse", "cancel"}))
@@ -245,35 +241,38 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
         return {"focus": {"handle": "terminal", "navigated": True, "tabId": "tab",
                           "worktreeId": f"repo::{c.checkout}"}}
 
-    def herdr_call(args, *, cwd, timeout):
-        if args == ["check", "--repo", str(c.root)]:
-            assert cwd == c.root
-            assert timeout == 10
-            if case == "preflight-fail":
-                raise workflow.HandoffError("preflight failed")
-            return "Ready"
-        assert args == ["open", "--repo", str(c.root), "--path", str(c.checkout)]
-        assert cwd == c.checkout
-        assert timeout == 90
+    def rex_prepare(cwd, session):
+        assert cwd == c.root
+        assert session is None
+        if case == "preflight-fail":
+            raise workflow.HandoffError("preflight failed")
+        return SimpleNamespace(session="session:fixture")
+
+    def rex_open(target, checkout, *, label):
+        assert target.session == "session:fixture"
+        assert checkout == c.checkout
+        assert label.endswith(": probe")
         if case == "handoff-fail":
             raise workflow.HandoffError("handoff failed")
-        return f"{'Reused' if case == 'reuse' else 'Started'} Pi in Herdr"
+        return "Opened a Rex tab"
 
-    transport = Mock(side_effect=orca_call if surface == "orca" else herdr_call)
+    transport = Mock(side_effect=orca_call if surface == "orca" else rex_prepare)
     if surface == "orca":
         monkeypatch.setattr(orca, "_orca", transport)
         unused_runner = Mock(side_effect=AssertionError("Unexpected real Orca subprocess"))
         monkeypatch.setattr(orca, "_run", unused_runner)
         guards.append(unused_runner)
     else:
-        monkeypatch.setattr(herdr.Target, "call", transport)
+        monkeypatch.setattr(rex, "prepare", transport)
+        handoff = Mock(side_effect=rex_open)
+        monkeypatch.setattr(rex, "handoff", handoff)
     result = runner.invoke(cli.app, [surface, str(c.root), "--branch", "probe"])
 
     _assert_unused([*guards, *c.mutations])
     wt.run.assert_not_called()
     assert result.exit_code == (0 if case in {"create", "reuse"} else 1), result.output
-    assert not (c.root.parent / "herdr-state").exists()
-    if surface == "herdr":
+    if surface == "rex":
+        assert handoff.call_count == int(case in {"create", "reuse", "handoff-fail"})
         assert not orca.STATE_ROOT.exists()
     if case == "cancel":
         transport.assert_not_called()
@@ -289,20 +288,22 @@ def test_explicit_commands_contact_only_the_matching_surface(monkeypatch, isolat
                                          base=None if case == "reuse" else "main", config_overrides=("post-start=[]",))
         c.cd.assert_called_once_with(c.checkout)
     if case in {"create", "reuse"}:
-        assert f"{'Started' if case == 'create' else 'Reused'} Pi" in result.output
         if surface == "orca":
+            assert f"{'Started' if case == 'create' else 'Reused'} Pi" in result.output
             assert orca.STATE_ROOT.exists()
+        else:
+            assert "Opened a Rex tab" in result.output
     elif case in {"setup-fail", "handoff-fail"}:
         assert f"Retry: cop {surface}" in result.output
+        if surface == "rex":
+            assert "--session session:fixture" in result.output
         message = "A wt setup hook failed" if case == "setup-fail" else "handoff failed"
         assert message in result.output
 
 
 def test_shared_prepare_contacts_neither_orchestrator(monkeypatch, isolated):
-    guards = _guards(monkeypatch, orca, herdr)
+    guards = _guards(monkeypatch, orca, rex)
     monkeypatch.setenv("WORKTRUNK_AGENT", "1")
-    monkeypatch.setenv("HERDR_ENV", "1")
-    monkeypatch.setenv("HERDR_SOCKET_PATH", "/tmp/test-only-caller.sock")
     gate = Mock(side_effect=AssertionError("Shared config reads must not apply a surface gate"))
     monkeypatch.setattr(workflow, "manual_invocation", gate)
     run = Mock(return_value=subprocess.CompletedProcess([], 0, '{"user": {"config": {}}}', ""))
@@ -314,7 +315,7 @@ def test_shared_prepare_contacts_neither_orchestrator(monkeypatch, isolated):
                                 cwd=isolated.root)
     _assert_unused([*guards, gate])
     assert not orca.STATE_ROOT.exists()
-    assert not (isolated.root.parent / "herdr-state").exists()
+    assert not rex.STATE_ROOT.exists()
     assert not workflow.STATE_ROOT.exists()
 
 
@@ -325,7 +326,7 @@ def test_fresh_cli_import_starts_no_subprocess(monkeypatch, isolated, tmp_path):
 from unittest.mock import Mock, patch
 blocked = Mock(side_effect=AssertionError("Import started a subprocess"))
 with patch("subprocess.Popen", blocked), patch("subprocess.run", blocked), patch("os.system", blocked):
-    from coppice import cli, herdr, orca
+    from coppice import cli, orca, rex
 blocked.assert_not_called()
 print("imported without subprocesses")
 """

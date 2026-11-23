@@ -61,6 +61,57 @@ def resolve_repo_root(path: str | Path = ".") -> Path:
     return common_dir if is_bare else common_dir.parent
 
 
+def main_worktree(path: str | Path) -> tuple[Path, str | None]:
+    """Return Git's first registered checkout, not the default branch's path."""
+    target = Path(path).expanduser()
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+
+    def read(*args: str, cwd: Path = target) -> str:
+        try:
+            result = subprocess.run(
+                ["git", "-C", str(cwd), *args],
+                capture_output=True,
+                text=True,
+                env=env,
+                timeout=5,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RepoResolutionError("Cannot inspect the main worktree.") from exc
+        if result.returncode:
+            raise RepoResolutionError("Cannot inspect the main worktree.")
+        return result.stdout
+
+    entry = read("worktree", "list", "--porcelain", "-z").split("\0\0", 1)[0].split("\0")
+    if not entry[0].startswith("worktree ") or "bare" in entry or any(x.startswith("prunable") for x in entry):
+        raise RepoResolutionError("This repository has no available main worktree.")
+    main = Path(entry[0].removeprefix("worktree ")).resolve()
+    if not main.is_dir() or Path(read("rev-parse", "--show-toplevel", cwd=main).rstrip("\n")).resolve() != main:
+        raise RepoResolutionError("This repository has no available main worktree.")
+    common_args = ("rev-parse", "--path-format=absolute", "--git-common-dir")
+    if Path(read(*common_args).rstrip("\n")).resolve() != Path(read(*common_args, cwd=main).rstrip("\n")).resolve():
+        raise RepoResolutionError("The main checkout no longer belongs to this repository.")
+    branch = next(
+        (field.removeprefix("branch refs/heads/") for field in entry if field.startswith("branch refs/heads/")), None
+    )
+    return main, branch
+
+
+def cached_default_branch(repo: Path) -> str | None:
+    try:
+        local = subprocess.run(
+            ["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if local.returncode == 0 and (ref := local.stdout.strip()):
+        return ref.removeprefix("origin/")
+    return None
+
+
 def default_branch(repo: Path, *, timeout: float = 5.0) -> str | None:
     """REPO's actual default branch (e.g. 'master' or 'main'), matching
     whatever its remote (GitHub, GitLab, ...) is configured with right now,
@@ -87,13 +138,8 @@ def default_branch(repo: Path, *, timeout: float = 5.0) -> str | None:
     free to omit `--base` and let `wt`'s own (still correct on a fresh
     clone, just not stale-cache-proof) resolution take over instead.
     """
-    local = subprocess.run(
-        ["git", "-C", str(repo), "symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD"],
-        capture_output=True,
-        text=True,
-    )
-    if local.returncode == 0 and (ref := local.stdout.strip()):
-        return ref.removeprefix("origin/")
+    if branch := cached_default_branch(repo):
+        return branch
 
     try:
         remote = subprocess.run(

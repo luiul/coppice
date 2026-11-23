@@ -56,7 +56,7 @@ def _run(
 
 
 def manual_invocation() -> bool:
-    """Allow manual shells, including Herdr, but not agent-marked calls."""
+    """Allow interactive human commands, but not agent-marked calls."""
     return sys.stdin.isatty() and os.environ.get("WORKTRUNK_AGENT") != "1"
 
 
