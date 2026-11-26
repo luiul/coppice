@@ -40,8 +40,7 @@ def isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(orca, "_run", Mock(side_effect=AssertionError("Unexpected subprocess")))
     monkeypatch.setattr(orca.shutil, "which", lambda name: "/fake/orca" if name == "orca" else None)
     monkeypatch.setattr(workflow.sys, "stdin", SimpleNamespace(isatty=lambda: True))
-    for name in ("WORKTRUNK_AGENT", "HERDR_ENV", "HERDR_SOCKET_PATH"):
-        monkeypatch.delenv(name, raising=False)
+    monkeypatch.delenv("WORKTRUNK_AGENT", raising=False)
 
 
 @pytest.fixture

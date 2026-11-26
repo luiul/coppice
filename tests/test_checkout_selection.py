@@ -145,9 +145,3 @@ def test_orca_main_activation_failure_retries_main_not_branch(checkout, monkeypa
     assert "Activation failed" in result.output
     assert "--main-worktree" in result.output and "--branch" not in result.output
     cd.assert_called_once_with(root.resolve())
-
-
-def test_retired_command_is_not_available():
-    result = runner.invoke(cli.app, ["herdr"])
-    assert result.exit_code == 2
-    assert "No such command" in result.output
